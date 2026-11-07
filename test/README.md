@@ -212,13 +212,25 @@ for the bundled `rate-limiting` plugin in sync and async modes and our
 fixed/sliding implementations.
 It preserves existing demo policies and removes each trial's entities afterward.
 
-All four modes use one daily limit on `X-Client-Id`, backed by the same Redis. The
+All four limiter modes use one daily limit on `X-Client-Id`, backed by the same Redis. The
 bundled plugin uses `policy=redis` and `fault_tolerant=false`. Sync uses
 `sync_rate=-1`; async defaults to `sync_rate=0.1` seconds, configurable with
 `--kong-async-sync-rate`. Our implementations both use synchronous Redis accounting.
 Our limit uses `[client_id]`, `window_ms=86400000`, and the selected algorithm.
 The daily window avoids short reset boundaries during samples. Trials refuse
 to start too close to the UTC day boundary.
+
+Two additional controls establish the underlying request-path performance:
+
+- **Direct echo backend:** target `echo:8080`, bypassing Kong entirely.
+- **Kong without plugins:** create a temporary service and route with no plugins
+  attached. This includes gateway proxying and the echo backend, with no limiter
+  or observation plugin.
+
+Controls run only in the admitted workload because they cannot throttle traffic.
+The report lists their throughput and latency beside Kong sync/async and our two
+algorithms. Gateway controls still exercise all three nodes; direct-backend
+samples omit gateway-distribution checks.
 
 Two workloads isolate response paths:
 
@@ -229,8 +241,8 @@ Two workloads isolate response paths:
 
 Each trial has a separate warmup followed by a measured sample. Fresh policies
 and caller identities prevent carryover between trials. Runs are serial, and
-implementation order rotates across repeats. All modes receive the same
-`post-function` header observer to identify gateways on 200 and 429 responses.
+implementation order rotates across repeats. Gateway attribution uses k6
+`remote_ip` mapped to the Docker IP of each node; no observer plugin is attached.
 All three gateways must receive traffic. Custom responses must report Redis
 mode; the baseline's standard limit header is checked because the bundled
 plugin does not expose an equivalent mode header. Baseline `redis_requests` is
@@ -264,6 +276,8 @@ PR creation, new commits, reopening, and readiness for review, and supports manu
 dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
 three repeats, and a 0.1-second Kong async interval. It runs independently of the
 correctness suite on an isolated Compose project.
+
+Both direct-backend and plugin-free gateway controls are included automatically.
 
 The workflow sets `COMPOSE_FILE=compose.yaml:compose.benchmark.yaml`. The
 [benchmark overlay](../compose.benchmark.yaml) applies these per-container caps:

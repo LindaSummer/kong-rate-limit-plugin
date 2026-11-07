@@ -26,7 +26,15 @@ def prepare(implementation, workload, sync_rate=0.1):
     path = "/" + name
     threshold = 1 if workload == "throttled" else 1000000
     client = name + "-measured"
-    if implementation.startswith("kong_"):
+    if implementation == "direct":
+        assert workload == "admitted", "Direct backend has no throttled workload"
+        assert http("http://echo:8080" + path)[0] == 200
+        return {"entities": entities, "path": path, "client": client,
+                "plugin": None, "config": {}, "threshold": None}
+    if implementation == "no_plugin":
+        assert workload == "admitted", "Unrestricted Kong has no throttled workload"
+        plugin_name, config = None, {}
+    elif implementation.startswith("kong_"):
         plugin_name = "rate-limiting"
         config = {"day": threshold, "limit_by": "header",
                   "header_name": "X-Client-Id", "policy": "redis",
@@ -44,26 +52,23 @@ def prepare(implementation, workload, sync_rate=0.1):
         route = admin("/routes", "POST", {"paths": [path], "strip_path": False,
                                           "service": {"id": service["id"]}})
         entities["routes"].append(route["id"])
-        plugin = admin(f'/services/{service["id"]}/plugins', "POST",
-                       {"name": plugin_name, "config": config})
-        entities["plugins"].append(plugin["id"])
-        # Identical observation overhead for both plugins, including their 429s.
-        observer = admin(f'/services/{service["id"]}/plugins', "POST", {
-            "name": "post-function", "config": {"header_filter": [
-                'kong.response.set_header("X-Benchmark-Instance", kong.node.get_hostname())']}})
-        entities["plugins"].append(observer["id"])
+        if plugin_name:
+            plugin = admin(f'/services/{service["id"]}/plugins', "POST",
+                           {"name": plugin_name, "config": config})
+            entities["plugins"].append(plugin["id"])
         started = time.monotonic()
         stable = 0
         while time.monotonic() - started < 30:
             results = [http(url + path, headers={"X-Client-Id": uuid.uuid4().hex}) for url in PROXIES]
             def ready(result):
                 status, headers, _ = result
-                observed = headers.get("X-Benchmark-Instance") in ("kong1", "kong2", "kong3")
+                if implementation == "no_plugin":
+                    return status == 200 and "X-RateLimit-Mode" not in headers and "X-RateLimit-Limit-Day" not in headers
                 selected = (headers.get("X-RateLimit-Limit-Day") == str(threshold)
                             if implementation.startswith("kong_") else
                             headers.get("X-RateLimit-Mode") == "redis" and
                             headers.get("X-RateLimit-Remaining") == str(threshold - 1))
-                return status == 200 and observed and selected
+                return status == 200 and selected
             if all(ready(r) for r in results):
                 stable += 1
                 if stable >= 15 and time.monotonic() - started >= 4:
@@ -99,7 +104,7 @@ def prepare(implementation, workload, sync_rate=0.1):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=["prepare", "cleanup"])
-    parser.add_argument("--implementation", choices=["kong_sync", "kong_async", "fixed_window", "sliding_window"])
+    parser.add_argument("--implementation", choices=["direct", "no_plugin", "kong_sync", "kong_async", "fixed_window", "sliding_window"])
     parser.add_argument("--workload", choices=["admitted", "throttled"])
     parser.add_argument("--sync-rate", type=float, default=0.1)
     args = parser.parse_args()

@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   benchmark:
-    name: Kong sync/async and custom windows
+    name: Direct/gateway controls and sync/async limiters
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:

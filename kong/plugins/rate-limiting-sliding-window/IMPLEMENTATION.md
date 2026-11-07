@@ -209,8 +209,9 @@ and pre-exhausted throttled workloads. Kong sync uses `sync_rate=-1`; async uses
 a configurable interval (default 0.1 seconds). Both fail closed on Redis errors.
 Our implementations use synchronous Redis accounting. Async caches settle before
 timing throttled traffic; this is not a comparison of overshoot guarantees. Both configurations have the
-same post-function gateway observer. No production plugin instrumentation is
-added for benchmarks.
+same peer-IP gateway attribution. No observer plugin is attached. Additional
+admitted-only controls target the echo backend directly and Kong with no plugins,
+separating backend, gateway, and limiter costs.
 
 The host orchestrator `test/compare_benchmarks.py` runs serial trials with a warmup
 per trial and rotates implementation order across repeats. It retains raw k6

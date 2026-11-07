@@ -5,7 +5,8 @@ import { Counter } from 'k6/metrics';
 const implementation = __ENV.BENCH_IMPLEMENTATION || 'custom';
 const expectedStatus = __ENV.BENCH_EXPECTED_STATUS || 'mixed';
 const expectedLimit = __ENV.BENCH_EXPECTED_LIMIT || '';
-if (!['custom', 'kong'].includes(implementation)) throw new Error('Invalid BENCH_IMPLEMENTATION');
+const peers = JSON.parse(__ENV.BENCH_GATEWAY_IPS || '{}');
+if (!['custom', 'kong', 'none', 'direct'].includes(implementation)) throw new Error('Invalid BENCH_IMPLEMENTATION');
 if (!['mixed', '200', '429'].includes(expectedStatus)) throw new Error('Invalid BENCH_EXPECTED_STATUS');
 
 const target = __ENV.BENCH_URL || 'http://gateway:8000/window/a';
@@ -43,9 +44,11 @@ export const options = {
   thresholds: {
     http_req_failed: ['rate==0'],
     checks: ['rate==1'],
-    kong1_requests: ['count>0'],
-    kong2_requests: ['count>0'],
-    kong3_requests: ['count>0'],
+    ...(implementation === 'direct' ? {} : {
+      kong1_requests: ['count>0'],
+      kong2_requests: ['count>0'],
+      kong3_requests: ['count>0'],
+    }),
     local_requests: ['count==0'],
   },
 };
@@ -72,7 +75,7 @@ export default function (data) {
     timeout: '5s',
     tags: { name: 'rate-limit-benchmark' },
   });
-  const instance = header(response, 'X-Benchmark-Instance') || header(response, 'X-Kong-Instance');
+  const instance = peers[response.remote_ip] || header(response, 'X-Kong-Instance');
   const mode = header(response, 'X-RateLimit-Mode');
   if (nodes[instance]) nodes[instance].add(1);
   admitted.add(response.status === 200 ? 1 : 0);
@@ -82,10 +85,11 @@ export default function (data) {
   local.add(mode === 'local' ? 1 : 0);
   check(response, {
     'status is 200 or 429': (r) => r.status === 200 || r.status === 429,
-    'gateway instance identified': () => Boolean(nodes[instance]),
+    'gateway instance identified or direct backend': () => implementation === 'direct' || Boolean(nodes[instance]),
     'configured limiter active': () => implementation === 'kong'
       ? header(response, 'X-RateLimit-Limit-Day') === expectedLimit
-      : mode === 'redis',
+      : implementation === 'custom' ? mode === 'redis'
+      : !mode && !header(response, 'X-RateLimit-Limit-Day'),
     'expected response path': (r) => expectedStatus === 'mixed' || r.status === Number(expectedStatus),
   });
 }
@@ -116,9 +120,9 @@ export function handleSummary(data) {
     admitted_200: count('admitted_requests'),
     throttled_429: count('throttled_requests'),
     unexpected: count('unexpected_responses'),
-    redis_requests: implementation === 'kong' ? null : count('redis_requests'),
+    redis_requests: implementation === 'custom' ? count('redis_requests') : null,
     local_requests: count('local_requests'),
-    gateways: distribution,
+    gateways: implementation === 'direct' ? null : distribution,
     latency_ms: values('http_req_duration'),
     connect_ms: values('http_req_connecting'),
     iteration_ms: values('iteration_duration'),

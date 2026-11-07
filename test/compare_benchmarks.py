@@ -10,7 +10,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 COMPOSE = ["docker", "compose"]
-IMPLEMENTATIONS = ["kong_sync", "kong_async", "fixed_window", "sliding_window"]
+IMPLEMENTATIONS = ["direct", "no_plugin", "kong_sync", "kong_async", "fixed_window", "sliding_window"]
 
 
 def command(args, *, stdin=None):
@@ -25,12 +25,14 @@ def configure(*args, stdin=None):
                               "--frozen", "--no-sync", "python", "benchmark_configure.py", *args], stdin=stdin)
 
 
-def run_k6(fixture, implementation, workload, vus, duration, keepalive, output):
+def run_k6(fixture, implementation, workload, vus, duration, keepalive, output, peers):
     args = COMPOSE + ["run", "--rm", "--no-deps", "-T"]
-    env = {"BENCH_URL": "http://gateway:8000" + fixture["path"],
+    kind = {"direct": "direct", "no_plugin": "none"}.get(implementation,
+            "kong" if implementation.startswith("kong_") else "custom")
+    env = {"BENCH_URL": ("http://echo:8080" if implementation == "direct" else "http://gateway:8000") + fixture["path"],
            "BENCH_CLIENT_MODE": "shared", "BENCH_CLIENT_ID": fixture["client"],
            "BENCH_KEEPALIVE": str(keepalive).lower(),
-           "BENCH_IMPLEMENTATION": "kong" if implementation.startswith("kong_") else "custom",
+           "BENCH_IMPLEMENTATION": kind, "BENCH_GATEWAY_IPS": json.dumps(peers),
            "BENCH_EXPECTED_STATUS": "200" if workload == "admitted" else "429",
            "BENCH_EXPECTED_LIMIT": str(fixture["threshold"])}
     for name, value in env.items():
@@ -59,7 +61,10 @@ def resources():
         if service in ("kong1", "kong2", "kong3", "redis", "postgres", "echo"):
             ids = command(COMPOSE + ["ps", "--quiet", service]).split()
             if ids:
-                actual = json.loads(command(["docker", "inspect", ids[0], "--format", "{{json .HostConfig}}"]))
+                container = json.loads(command(["docker", "inspect", ids[0]]))[0]
+                actual = container["HostConfig"]
+                settings[service]["addresses"] = [network["IPAddress"] for network in
+                    container["NetworkSettings"]["Networks"].values() if network.get("IPAddress")]
                 settings[service]["observed"] = {
                     "nano_cpus": actual["NanoCpus"], "cpu_quota": actual["CpuQuota"],
                     "cpu_period": actual["CpuPeriod"], "memory_bytes": actual["Memory"],
@@ -76,7 +81,7 @@ def markdown(report):
              f"Docker host: {env['cpus']} logical CPUs, {env['memory_bytes'] / 2**30:.1f} GiB RAM, {env['architecture']}.",
              f"{report['vus']} VUs; {report['warmup_seconds']}s unreported warmup then {report['duration_seconds']}s measured per trial; "
              f"{report['repeats']} repeats. Keepalive: `{report['keepalive']}`. "
-             "IPv4 DNS round robin across `gateway`; runs are serial and implementation order rotates per repeat.",
+             "Gateway traffic uses IPv4 DNS round robin; the direct control bypasses Kong. Runs are serial and implementation order rotates per repeat.",
              f"Kong async sync_rate: {report['kong_async_sync_rate']} seconds. Our implementations use synchronous Redis accounting.", "",
              "### CPU and memory settings", "",
              "CPU values are per-container quotas, not dedicated cores; zero means no explicit cap. All containers share the host.", "",
@@ -87,18 +92,20 @@ def markdown(report):
         memory = f"{setting['memory_bytes'] / 2**20:.0f} MiB" if setting["memory_bytes"] else "Uncapped"
         lines.append(f"| {service} | {cpus} | {memory} | {setting['cpuset'] or 'None'} |")
     lines += ["", "### Results", "",
-             "| Workload | Plugin | Median req/s (min–max) | vs Kong | Median p95 ms | Median p99 ms | Measured 200 / 429 |",
+             "| Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |",
              "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
     for workload in ("admitted", "throttled"):
         baseline = statistics.median(r["report"]["requests_per_second"] for r in report["runs"]
                                      if r["workload"] == workload and r["implementation"] == "kong_sync")
         for implementation in IMPLEMENTATIONS:
+            if workload == "throttled" and implementation in ("direct", "no_plugin"):
+                continue
             runs = [r["report"] for r in report["runs"] if r["workload"] == workload and r["implementation"] == implementation]
             rates = [r["requests_per_second"] for r in runs]
             median = statistics.median(rates)
             p95 = statistics.median(r["latency_ms"]["p(95)"] for r in runs)
             p99 = statistics.median(r["latency_ms"]["p(99)"] for r in runs)
-            label = {"kong_sync": "Kong sync", "kong_async": "Kong async"}.get(implementation, "Custom " + implementation)
+            label = {"direct": "Direct echo backend", "no_plugin": "Kong without plugins", "kong_sync": "Kong sync", "kong_async": "Kong async"}.get(implementation, "Custom " + implementation)
             lines.append(f"| {workload} | {label} | {median:,.0f} ({min(rates):,.0f}–{max(rates):,.0f}) | "
                          f"{median / baseline:.2f}× | {p95:.3f} | {p99:.3f} | "
                          f"{sum(r['admitted_200'] for r in runs):,} / {sum(r['throttled_429'] for r in runs):,} |")
@@ -112,8 +119,9 @@ def markdown(report):
               "The throttled caller is primed until worker responses settle; this is a rejection-path benchmark, not an async overshoot or quota-accuracy test.",
               "- The fixed-window run is the closest functional comparison. The sliding-window run measures a different algorithm; "
               "it is not evidence that the plugins enforce identical rolling quotas.",
-              "- Both configurations attach the same post-function header observer to identify each gateway, including rejected responses. "
-              "Every trial must hit all three nodes; custom responses must report Redis mode. "
+              "- Direct echo bypasses Kong; the no-plugin Kong control attaches no plugins. These controls have admitted traffic only. "
+              "All gateway samples use peer IPs mapped to Docker containers for attribution, with no observer plugin. "
+              "Every gateway trial must hit all three nodes; custom responses must report Redis mode. "
               "The bundled plugin has no Redis-mode diagnostic: its configured policy, limiter header, fail-closed behavior, "
               "and absence of request errors are checked instead.",
               "- Values are medians across trials; p95/p99 columns are medians of per-trial percentiles, not pooled percentiles. "
@@ -160,10 +168,14 @@ def main():
                               "docker_version": info["ServerVersion"]}, "resources": resources(), "images": {}, "runs": []}
     for tag in ("kong:3.9.4", "redis:7.4-alpine", "grafana/k6:1.3.0"):
         report["images"][tag] = command(["docker", "image", "inspect", tag, "--format", "{{.Id}}"]).strip()
+    peers = {address: service for service, setting in report["resources"].items()
+             if service in ("kong1", "kong2", "kong3") for address in setting.get("addresses", [])}
+    assert len(peers) >= 3, "Gateway peer addresses unavailable"
     for repeat in range(args.repeats):
-        offset = repeat % len(IMPLEMENTATIONS)
-        order = IMPLEMENTATIONS[offset:] + IMPLEMENTATIONS[:offset]
         for workload in ("admitted", "throttled"):
+            eligible = IMPLEMENTATIONS if workload == "admitted" else IMPLEMENTATIONS[2:]
+            offset = (repeat * 2 if workload == "admitted" else repeat) % len(eligible)
+            order = eligible[offset:] + eligible[:offset]
             for implementation in order:
                 # Daily windows must not reset during a warmup/measured sample.
                 if 86400 - time.time() % 86400 < args.duration + args.warmup + 45:
@@ -173,8 +185,8 @@ def main():
                 fixture = json.loads(configure("prepare", "--implementation", implementation, "--workload", workload,
                                                "--sync-rate", str(args.kong_async_sync_rate)))
                 try:
-                    run_k6(fixture, implementation, workload, args.vus, args.warmup, args.keepalive, output / (label + "-warmup.json"))
-                    result = run_k6(fixture, implementation, workload, args.vus, args.duration, args.keepalive, output / (label + ".json"))
+                    run_k6(fixture, implementation, workload, args.vus, args.warmup, args.keepalive, output / (label + "-warmup.json"), peers)
+                    result = run_k6(fixture, implementation, workload, args.vus, args.duration, args.keepalive, output / (label + ".json"), peers)
                     report["runs"].append({"repeat": repeat + 1, "workload": workload,
                                            "implementation": implementation, "plugin": fixture["plugin"],
                                            "config": fixture["config"], "report": result})
