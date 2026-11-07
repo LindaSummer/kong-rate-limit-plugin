@@ -24,10 +24,11 @@ default policy. The suite temporarily pauses Redis, flushes its Lua script cache
 and creates temporary Kong entities. Do not run tests or benchmarks concurrently
 against the same Compose project. `stop` retains PostgreSQL and Redis volumes.
 
-The full suite passed after the directory rename on 2026-11-07: 12 Lua files
-compiled, 13,821 unit assertions, three shared-memory groups, six Redis groups,
-13 gateway groups, and the restart check. These counts describe the current
-scripts; they are not separate test functions or performance measurements.
+The current suite passed on 2026-11-07: 12 Lua files compiled, 13,821 unit
+assertions, three shared-memory groups, six Redis groups, 14 pytest gateway cases,
+and one pytest restart case. Fixed/sliding algorithms and upstream 429/503
+responses have separate parameterized cases. Default pytest selection runs the
+14 gateway cases; the runner selects the restart case after restarting `kong1`.
 
 ## Files and execution order
 
@@ -37,8 +38,11 @@ scripts; they are not separate test functions or performance measurements.
 | [window_unit.lua](window_unit.lua) | Deterministic calculations, identity encoding, mocked failure paths, and breaker transitions. |
 | [window_shared.lua](window_shared.lua) | Real shared-memory locking, probe contention, and memory exhaustion in a separate `resty` process. |
 | [window_redis.lua](window_redis.lua) | Real Redis pipelines, counters, concurrency, script-cache recovery, and field expiration. |
-| [window_integration.py](window_integration.py) | HTTP behavior and live configuration across three gateways. |
-| [window_restart.py](window_restart.py) | Prepare a budget, then verify it survives a gateway restart. |
+| [test_integration.py](test_integration.py) | HTTP behavior and live configuration across three gateways. |
+| [window_restart.py](window_restart.py) | Prepare the budget before the host restarts a gateway. |
+| [test_restart.py](test_restart.py) | Verify the Redis budget survives the restart and clean up. |
+| [conftest.py](conftest.py) / [window_support.py](window_support.py) | Per-test cleanup fixture, policy factory, and HTTP scenario helpers. |
+| [pyproject.toml](pyproject.toml) / [uv.lock](uv.lock) / [Dockerfile](Dockerfile) | Python 3.12 test project, locked dependencies, and uv test image. |
 | [window_configure.py](window_configure.py) | Install the default policy and wait for all gateways to adopt it. |
 | [common.py](common.py) | Standard-library HTTP, Admin API, Redis RESP, and setup helpers. |
 | [echo.py](echo.py) | Echo requests and simulate upstream 429/503 responses. |
@@ -84,25 +88,25 @@ dictionaries, so its exhaustion test does not fill a live gateway's dictionary.
 
 ## Gateway integration cases
 
-The HTTP suite uses unique temporary services, routes, and callers, removing its
-entities in `finally`. Policy readiness is checked across all gateways with an
-allowance of 30 seconds. Most quota tests use a one-day window to avoid unrelated
+The HTTP suite uses unique temporary services, routes, and callers. A pytest
+fixture removes each test's entities even if setup or assertions fail. Policy
+readiness is checked across all gateways with an allowance of 30 seconds. Most quota tests use a one-day window to avoid unrelated
 boundary crossings. Bursts use 24 client threads and distribute requests across
 the three gateways.
 
-| Group | Scenario and expected result |
+| pytest case | Scenario and expected result |
 | --- | --- |
-| 1–2: shared fixed/sliding budgets | For each algorithm, 60 attempts with limit 12 yield exactly 12 HTTP 200s; the rest are 429. All gateways participate. A second route on the same service shares the exhausted budget; another client is independent. Denials include numeric `Retry-After` and `Cache-Control: no-store`; missing required ClientId returns 400. |
-| 3: client and path | With limit one on `[client_id,path]`, query strings and `/./` normalization use the same bucket. Another path/client is independent. Duplicate and oversized ClientId headers return 400. |
-| 4: method, route, service | Limit one on `[client_id,method,route,service]`. A child path on the same route shares usage; POST and a second route receive separate buckets. |
-| 5: simultaneous limits | A path limit of one plus a client limit of two count every attempt. A request denied by the path limit also consumes the broader client budget, blocking a different path. |
-| 6: precedence | A route limit of three overrides a service limit of one. The route admits three then denies; a sibling route uses the separate service budget. |
-| 7: live updates | Increase a threshold from two to three after one attempt: only two further attempts pass. Change the window shape: new state is selected. |
-| 8: schema | Reject zero limits, unknown algorithms, repeated dimensions, duplicate limits with reordered dimensions, windows above one day, and Consumer attachment. |
-| 9: IP identity | A fixed IP limit of four per second admits exactly four of 30 attempts across gateways. ClientId is unnecessary; a sibling route shares the IP budget. |
-| 10: upstream responses | Backend 429 and 503 responses preserve status and `Retry-After`, both numeric (`7`) and HTTP-date values. |
-| 11–12: outage and recovery | For each algorithm, pause Redis for 2.2 seconds. Sixty attempts with limit four use local enforcement and admit exactly four per node across its workers. Redis traffic resumes through recovery and reaches stable Redis mode. |
-| 13: authentication failure | Configure an incorrect Redis password. Requests use local budgets, admitting five per node from a 60-request burst; statuses are 200/429 rather than unavailable responses. |
+| `test_shared_budgets[fixed_window]`, `[sliding_window]` | For each algorithm, 60 attempts with limit 12 yield exactly 12 HTTP 200s; the rest are 429. All gateways participate. A second route on the same service shares the exhausted budget; another client is independent. Denials include numeric `Retry-After` and `Cache-Control: no-store`; missing required ClientId returns 400. |
+| `test_composite_dimensions` | With limit one on `[client_id,path]`, query strings and `/./` normalization use the same bucket. Another path/client is independent. Duplicate and oversized ClientId headers return 400. |
+| `test_method_route_service` | Limit one on `[client_id,method,route,service]`. A child path on the same route shares usage; POST and a second route receive separate buckets. |
+| `test_simultaneous_limits` | A path limit of one plus a client limit of two count every attempt. A request denied by the path limit also consumes the broader client budget, blocking a different path. |
+| `test_route_precedence` | A route limit of three overrides a service limit of one. The route admits three then denies; a sibling route uses the separate service budget. |
+| `test_live_updates` | Increase a threshold from two to three after one attempt: only two further attempts pass. Change the window shape: new state is selected. |
+| `test_schema_validation` | Reject zero limits, unknown algorithms, repeated dimensions, duplicate limits with reordered dimensions, windows above one day, and Consumer attachment. This case creates its own policy. |
+| `test_ip_budget` | A fixed IP limit of four per second admits exactly four of 30 attempts across gateways. ClientId is unnecessary; a sibling route shares the IP budget. |
+| `test_upstream_headers[429]`, `[503]` | Backend errors preserve status and `Retry-After`, both numeric (`7`) and HTTP-date values. |
+| `test_redis_outage_recovery[fixed_window]`, `[sliding_window]` | For each algorithm, pause Redis for 2.2 seconds. Sixty attempts with limit four use local enforcement and admit exactly four per node across its workers. Redis traffic resumes through recovery and reaches stable Redis mode. |
+| `test_redis_authentication_fallback` | Configure an incorrect Redis password. Requests use local budgets, admitting five per node from a 60-request burst; statuses are 200/429 rather than unavailable responses. |
 
 `echo.py` normally returns 200. Only paths beginning with `/upstream429` or
 `/upstream503` simulate upstream errors and set `Retry-After`; a path containing
@@ -112,10 +116,48 @@ the plugin's own rejection headers.
 ## Restart case
 
 `window_restart.py prepare` creates a sliding limit of two per day and consumes
-one admission. The runner restarts `kong1`, waits for health, then runs `verify`.
+one admission. The runner restarts `kong1`, waits for health, then selects
+`test_redis_budget_survives_gateway_restart` in `test_restart.py`.
 Exactly one more admission is available on the restarted gateway; subsequent
 requests on all three gateways return 429. The Redis budget survives the restart.
-The verification step removes the temporary entities and fixture key.
+The pytest verification fixture removes the temporary entities and fixture key.
+The restart test is marked `restart` and excluded from ordinary pytest runs.
+
+## pytest and uv
+
+The separate test image uses Python 3.12, pins uv 0.9.4, and installs pytest
+8.4.2 and its transitive dependencies from `uv.lock` with `uv sync --locked --no-dev`. Its environment lives at `/opt/test-venv`, outside the
+read-only `/test` source mount. Runtime commands use `uv run --frozen --no-sync`,
+so dependency installation happens during the build rather than on every test run.
+The host needs Docker/Compose; host uv is optional. `start` and `test` build the
+test image once before running Python commands. Pytest writes its cache under
+`/tmp/kong-window-pytest-cache`, keeping the source mount read-only.
+
+The runner executes Lua checks first, then the 14 gateway cases, restart fixture
+preparation, the host-controlled restart, the single restart verifier, and default
+policy setup. GitHub Actions invokes the same runner and uploads its output and
+container logs; it does not need a separate host Python or uv installation.
+
+```sh
+# Collect cases without contacting Kong or Redis.
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync pytest --collect-only -q
+
+# Run one named case (including both algorithm parameters).
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync pytest -v -k shared_budgets
+
+# Select exactly one algorithm case.
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync pytest -v 'test_integration.py::test_shared_budgets[sliding_window]'
+
+# Resolve/update dependencies after editing pyproject.toml (host uv and Python 3.12).
+uv lock --project test
+```
+
+For local collection without containers, run
+`uv run --directory test --locked pytest --collect-only -q`. Actual HTTP cases use
+Compose DNS names by default; the container commands above supply that network.
+Tests run serially; do not add pytest-xdist workers because outage cases pause
+shared Redis. Default selection excludes `restart`; `./run.sh test` explicitly
+selects it after preparation and the host-controlled restart.
 
 ## Running individual checks
 
@@ -126,7 +168,7 @@ docker compose exec -T kong1 /usr/local/openresty/luajit/bin/luajit /test/check_
 docker compose exec -T kong1 /usr/local/openresty/bin/resty /test/window_unit.lua
 docker compose exec -T kong1 /usr/local/openresty/bin/resty --shdict 'sliding_ratelimit 1m' --shdict 'kong_locks 1m' /test/window_shared.lua
 docker compose exec -T kong1 /usr/local/openresty/bin/resty /test/window_redis.lua
-docker compose run --rm --no-deps tests python window_integration.py
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync pytest -v
 ```
 
 Use `./run.sh test` for the complete prepare/restart/verify sequence. After plugin

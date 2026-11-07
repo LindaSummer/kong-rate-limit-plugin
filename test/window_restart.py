@@ -1,4 +1,4 @@
-"""The host runner restarts kong1 between prepare and verify."""
+"""Prepare the Redis budget before the host runner restarts kong1."""
 import json
 import sys
 import time
@@ -27,17 +27,3 @@ if sys.argv[1] == "prepare":
     assert all(r[1].get("X-RateLimit-Remaining") == "1" for r in responses), responses
     assert http(PROXIES[0]+fixture["path"], headers={"X-Client-Id": fixture["client"]})[0] == 200
     print("PASS window restart fixture consumed one of two admissions")
-else:
-    raw = redis("GET", key)
-    assert raw, "restart fixture expired"
-    fixture = json.loads(raw)
-    try:
-        headers = {"X-Client-Id": fixture["client"]}
-        assert http(PROXIES[0]+fixture["path"], headers=headers)[0] == 200
-        assert all(http(url+fixture["path"], headers=headers)[0] == 429 for url in PROXIES)
-        print("PASS Kong restart preserved sliding-window Redis budget")
-    finally:
-        admin('/plugins/' + fixture["plugin"], "DELETE")
-        admin('/routes/' + fixture["route"], "DELETE")
-        admin('/services/' + fixture["service"], "DELETE")
-        redis("DEL", key)

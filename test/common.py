@@ -1,4 +1,4 @@
-"""Standard-library HTTP and RESP clients; no test dependency installation."""
+"""Standard-library HTTP and RESP helpers for setup and pytest."""
 import json
 import os
 import socket

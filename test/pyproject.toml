@@ -1,0 +1,14 @@
+[project]
+name = "kong-window-tests"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = ["pytest>=8.4,<9"]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+addopts = "-ra --strict-markers -m 'not restart'"
+cache_dir = "/tmp/kong-window-pytest-cache"
+markers = ["restart: verification requiring the runner's prepare/restart sequence"]
