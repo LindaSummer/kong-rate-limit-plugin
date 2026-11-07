@@ -3,6 +3,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class Echo(BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+    disable_nagle_algorithm = True
+
     def respond(self):
         status = 429 if self.path.startswith("/upstream429") else 503 if self.path.startswith("/upstream503") else 200
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode(errors="replace")

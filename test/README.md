@@ -259,8 +259,12 @@ observed settings for persistent containers, image IDs, source revision, per-tri
 policies and results, and `report.md` suitable for a PR comment. Warmups are excluded from
 reported rates. Summary tables use median request rates with min/max ranges;
 latency columns are medians of per-trial p95/p99 values, not pooled percentiles.
-Use `--keepalive` for a separate connection-reuse experiment; defaults open a
-new connection per request. Do not mix keepalive settings in one comparison.
+The CI and full local comparisons use `--keepalive` and an HTTP/1.1 echo backend
+to avoid exhausting client source ports in direct-backend samples. The echo
+server disables Nagle so small persistent responses do not incur an artificial
+delayed-ACK wait. The harness
+still defaults to opening a new connection per request for explicit connection
+cost experiments; do not mix these settings in one comparison.
 
 Ratios in the table use Kong sync as the denominator. The fixed-window
 comparison with Kong sync is the closest functional baseline. Sliding windows
@@ -274,7 +278,7 @@ results as end-to-end measurements for the recorded host and settings.
 [The benchmark workflow](../.github/workflows/benchmark.yml) runs automatically on
 PR creation, new commits, reopening, and readiness for review, and supports manual
 dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
-three repeats, and a 0.1-second Kong async interval. It runs independently of the
+three repeats, keepalive enabled, and a 0.1-second Kong async interval. It runs independently of the
 correctness suite on an isolated Compose project.
 
 Both direct-backend and plugin-free gateway controls are included automatically.

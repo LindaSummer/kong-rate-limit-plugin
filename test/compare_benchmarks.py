@@ -110,7 +110,7 @@ def markdown(report):
                          f"{median / baseline:.2f}× | {p95:.3f} | {p99:.3f} | "
                          f"{sum(r['admitted_200'] for r in runs):,} / {sum(r['throttled_429'] for r in runs):,} |")
     lines += ["", "Conditions and interpretation:", "",
-              "- One service-scoped Redis-backed daily limit on `X-Client-Id`: 1,000,000 for admitted traffic, "
+              "- Limiter modes use one service-scoped Redis-backed daily limit on `X-Client-Id`: 1,000,000 for admitted traffic, "
               "one pre-consumed admission for throttled traffic. All measured responses must match the workload's expected status.",
               "- Kong baselines: bundled `rate-limiting`, `policy=redis`, `fault_tolerant=false`; "
               "sync uses `sync_rate=-1`, async uses the interval listed above. Ratios use Kong sync as the denominator. "

@@ -36,7 +36,7 @@ jobs:
 
       - name: Run serial benchmark comparison
         run: |
-          ./run.sh benchmark-compare --vus 10 --duration 10 --warmup 2 --repeats 3 \
+          ./run.sh benchmark-compare --vus 10 --duration 10 --warmup 2 --repeats 3 --keepalive \
             --kong-async-sync-rate 0.1 --output "$RUNNER_TEMP/benchmark-report" \
             2>&1 | tee "$RUNNER_TEMP/benchmark-report/runner.log"
 
