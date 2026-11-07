@@ -285,6 +285,17 @@ BENCH_URL=http://gateway:8000/my-route \
 docker compose run --rm --no-deps benchmark run --vus 20 --duration 30s /test/benchmark.js
 ```
 
+To compare the bundled Kong Redis limiter against our fixed and sliding windows:
+
+```sh
+./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
+  --output /tmp/kong-rate-limit-comparison
+```
+
+This uses temporary policies, separate admitted/throttled workloads, and rotating
+serial trials. It requires host Python 3 and writes raw JSON plus a Markdown
+comparison report. See the [comparison methodology](test/README.md#compare-against-kongs-bundled-plugin).
+
 Environment defaults: `BENCH_VUS=20`, `BENCH_DURATION=30s`,
 `BENCH_KEEPALIVE=false`, `BENCH_CLIENT_MODE=shared`. `BENCH_CLIENT_ID` optionally
 sets a stable client identity. Client modes are `shared`, `per-vu`, and `unique`;

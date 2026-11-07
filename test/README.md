@@ -196,6 +196,54 @@ it appends both VU and iteration numbers. `BENCH_VUS` and `BENCH_DURATION` suppl
 defaults; CLI `--vus` and `--duration` override them. Benchmarking does not modify
 installed policies or reset counters. Reusing a base ClientId can reuse budgets.
 
+### Compare against Kong's bundled plugin
+
+```sh
+./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
+  --output /tmp/kong-rate-limit-comparison
+```
+
+This command also requires host Python 3 (standard library only). It starts the
+stack, builds the uv test image, and creates temporary service-scoped policies
+for the bundled `rate-limiting` plugin and our fixed/sliding implementations.
+It preserves existing demo policies and removes each trial's entities afterward.
+
+All three use one daily limit on `X-Client-Id`, backed by the same Redis. The
+bundled plugin uses `policy=redis`, `sync_rate=-1`, and `fault_tolerant=false`.
+Our limit uses `[client_id]`, `window_ms=86400000`, and the selected algorithm.
+The daily window avoids short reset boundaries during samples. Trials refuse
+to start too close to the UTC day boundary.
+
+Two workloads isolate response paths:
+
+- **Admitted:** a shared caller with limit 1,000,000; every measured response must
+  be 200. A shared caller keeps key cardinality comparable across plugins.
+- **Throttled:** a shared caller with limit one, consumed before warmup; every
+  measured response must be 429.
+
+Each trial has a separate warmup followed by a measured sample. Fresh policies
+and caller identities prevent carryover between trials. Runs are serial, and
+implementation order rotates across repeats. Both plugins receive the same
+`post-function` header observer to identify gateways on 200 and 429 responses.
+All three gateways must receive traffic. Custom responses must report Redis
+mode; the baseline's standard limit header is checked because the bundled
+plugin does not expose an equivalent mode header. Baseline `redis_requests` is
+`null`, rather than claiming an observed Redis-mode count.
+
+The output directory contains raw warmup/measured JSON and stderr logs,
+`report.json` with environment/image IDs, source revision, per-trial policies and
+results, and `report.md` suitable for a PR comment. Warmups are excluded from
+reported rates. Summary tables use median request rates with min/max ranges;
+latency columns are medians of per-trial p95/p99 values, not pooled percentiles.
+Use `--keepalive` for a separate connection-reuse experiment; defaults open a
+new connection per request. Do not mix keepalive settings in one comparison.
+
+The fixed-window comparison is the closest functional baseline. Sliding windows
+perform different accounting, so their result measures that implementation's
+cost rather than equivalent quota accuracy. All containers share the host without
+CPU pinning, and admitted requests include Python echo processing. Interpret
+results as end-to-end measurements for the recorded host and settings.
+
 ### DNS and connection behavior
 
 All gateways register the `gateway` alias. k6 uses IPv4, `roundRobin` selection,
@@ -233,7 +281,8 @@ Preserve the report with the source revision, policy, host resources, and load
 settings when comparing runs. Results include gateway processing, Redis, network
 costs, all applicable plugins, and the echo backend for admitted requests. A
 mostly-429 run does not measure admitted-request throughput. This README defines
-the cases and report format; it does not establish a performance baseline.
+the cases and report format. `benchmark-compare` produces a measured baseline
+for a particular host and run; it is not a production capacity guarantee.
 
 ## Coverage limits
 

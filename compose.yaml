@@ -113,6 +113,9 @@ services:
       BENCH_KEEPALIVE: ${BENCH_KEEPALIVE:-false}
       BENCH_CLIENT_MODE: ${BENCH_CLIENT_MODE:-shared}
       BENCH_CLIENT_ID: ${BENCH_CLIENT_ID:-}
+      BENCH_IMPLEMENTATION: ${BENCH_IMPLEMENTATION:-custom}
+      BENCH_EXPECTED_STATUS: ${BENCH_EXPECTED_STATUS:-mixed}
+      BENCH_EXPECTED_LIMIT: ${BENCH_EXPECTED_LIMIT:-}
     volumes: ["./test:/test:ro"]
     depends_on:
       kong1:

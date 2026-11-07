@@ -1,0 +1,146 @@
+"""Run serial, alternating k6 comparisons using temporary Kong policies."""
+import argparse
+from datetime import datetime, timezone
+import json
+from pathlib import Path
+import platform
+import statistics
+import subprocess
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+COMPOSE = ["docker", "compose", "-f", str(ROOT / "compose.yaml")]
+IMPLEMENTATIONS = ["kong", "fixed_window", "sliding_window"]
+
+
+def command(args, *, stdin=None):
+    result = subprocess.run(args, cwd=ROOT, text=True, input=stdin, capture_output=True)
+    if result.returncode:
+        raise RuntimeError(f"Command failed ({result.returncode}): {args}\n{result.stdout}\n{result.stderr}")
+    return result.stdout
+
+
+def configure(*args, stdin=None):
+    return command(COMPOSE + ["run", "--rm", "--no-deps", "-T", "tests", "uv", "run",
+                              "--frozen", "--no-sync", "python", "benchmark_configure.py", *args], stdin=stdin)
+
+
+def run_k6(fixture, implementation, workload, vus, duration, keepalive, output):
+    args = COMPOSE + ["run", "--rm", "--no-deps", "-T"]
+    env = {"BENCH_URL": "http://gateway:8000" + fixture["path"],
+           "BENCH_CLIENT_MODE": "shared", "BENCH_CLIENT_ID": fixture["client"],
+           "BENCH_KEEPALIVE": str(keepalive).lower(),
+           "BENCH_IMPLEMENTATION": "kong" if implementation == "kong" else "custom",
+           "BENCH_EXPECTED_STATUS": "200" if workload == "admitted" else "429",
+           "BENCH_EXPECTED_LIMIT": str(fixture["threshold"])}
+    for name, value in env.items():
+        args.extend(["-e", f"{name}={value}"])
+    args += ["benchmark", "run", "--quiet", "--vus", str(vus), "--duration", f"{duration}s", "/test/benchmark.js"]
+    result = subprocess.run(args, cwd=ROOT, text=True, capture_output=True)
+    output.write_text(result.stdout)
+    output.with_suffix(".log").write_text(result.stderr)
+    if result.returncode:
+        raise RuntimeError(f"k6 failed; see {output} and {output.with_suffix('.log')}")
+    report = json.loads(result.stdout)
+    assert report["thresholds_passed"] and not report["unexpected"] and not report["failed_checks"], report
+    return report
+
+
+def markdown(report):
+    env = report["environment"]
+    lines = ["## Rate-limiter benchmark: Kong baseline vs custom windows", "",
+             f"Source revision: `{report['revision']}` (dirty: `{report['dirty']}`).",
+             f"Executed: {report['timestamp_utc']}.", "",
+             "Kong 3.9.4, Redis 7.4, k6 1.3.0; three Kong nodes with two workers each.",
+             f"Docker host: {env['cpus']} logical CPUs, {env['memory_bytes'] / 2**30:.1f} GiB RAM, {env['architecture']}.",
+             f"{report['vus']} VUs; {report['warmup_seconds']}s unreported warmup then {report['duration_seconds']}s measured per trial; "
+             f"{report['repeats']} repeats. Keepalive: `{report['keepalive']}`. "
+             "IPv4 DNS round robin across `gateway`; runs are serial and implementation order rotates per repeat.", "",
+             "| Workload | Plugin | Median req/s (min–max) | vs Kong | Median p95 ms | Median p99 ms | Measured 200 / 429 |",
+             "| --- | --- | ---: | ---: | ---: | ---: | ---: |"]
+    for workload in ("admitted", "throttled"):
+        baseline = statistics.median(r["report"]["requests_per_second"] for r in report["runs"]
+                                     if r["workload"] == workload and r["implementation"] == "kong")
+        for implementation in IMPLEMENTATIONS:
+            runs = [r["report"] for r in report["runs"] if r["workload"] == workload and r["implementation"] == implementation]
+            rates = [r["requests_per_second"] for r in runs]
+            median = statistics.median(rates)
+            p95 = statistics.median(r["latency_ms"]["p(95)"] for r in runs)
+            p99 = statistics.median(r["latency_ms"]["p(99)"] for r in runs)
+            label = "Kong bundled rate-limiting" if implementation == "kong" else "Custom " + implementation
+            lines.append(f"| {workload} | {label} | {median:,.0f} ({min(rates):,.0f}–{max(rates):,.0f}) | "
+                         f"{median / baseline:.2f}× | {p95:.3f} | {p99:.3f} | "
+                         f"{sum(r['admitted_200'] for r in runs):,} / {sum(r['throttled_429'] for r in runs):,} |")
+    lines += ["", "Conditions and interpretation:", "",
+              "- One service-scoped Redis-backed daily limit on `X-Client-Id`: 1,000,000 for admitted traffic, "
+              "one pre-consumed admission for throttled traffic. All measured responses must match the workload's expected status.",
+              "- Kong baseline: bundled `rate-limiting`, `policy=redis`, `sync_rate=-1`, `fault_tolerant=false`. "
+              "Custom: one fixed or approximate sliding window, 86,400,000 ms, dimension `client_id`.",
+              "- The fixed-window run is the closest functional comparison. The sliding-window run measures a different algorithm; "
+              "it is not evidence that the plugins enforce identical rolling quotas.",
+              "- Both configurations attach the same post-function header observer to identify each gateway, including rejected responses. "
+              "Every trial must hit all three nodes; custom responses must report Redis mode. "
+              "The bundled plugin has no Redis-mode diagnostic: its configured policy, limiter header, fail-closed behavior, "
+              "and absence of request errors are checked instead.",
+              "- Values are medians across trials; p95/p99 columns are medians of per-trial percentiles, not pooled percentiles. "
+              "Response latency excludes TCP connection setup. Raw reports include connection and iteration times, per-node distribution, and individual trials.",
+              "- Gateways, Redis, echo backend, and load generator share this Docker host without CPU pinning. "
+              "Admitted requests include the Python echo backend; denied requests do not. These are end-to-end results for this host, "
+              "not isolated plugin CPU measurements or production capacity guarantees.",
+              "- Policies are fresh per trial and removed afterward; existing demo routes and data are preserved. "
+              "Warmup requests are excluded from reported metrics but consume the same trial budget.", ""]
+    return "\n".join(lines)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--vus", type=int, default=20)
+    parser.add_argument("--duration", type=int, default=15, help="Measured seconds per trial")
+    parser.add_argument("--warmup", type=int, default=3, help="Warmup seconds per trial")
+    parser.add_argument("--repeats", type=int, default=3)
+    parser.add_argument("--keepalive", action="store_true")
+    parser.add_argument("--output", type=Path, default=Path("/tmp/kong-rate-limit-comparison"))
+    args = parser.parse_args()
+    if min(args.vus, args.duration, args.warmup, args.repeats) < 1:
+        parser.error("vus, duration, warmup and repeats must be positive")
+    if args.duration + args.warmup > 120:
+        parser.error("Each trial must be at most 120 seconds to keep the admitted budget practical")
+    output = args.output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    info = json.loads(command(["docker", "info", "--format", "{{json .}}"]))
+    report = {"timestamp_utc": datetime.now(timezone.utc).isoformat(),
+              "revision": command(["git", "rev-parse", "HEAD"]).strip(),
+              "dirty": bool(command(["git", "status", "--porcelain"]).strip()),
+              "vus": args.vus, "duration_seconds": args.duration, "warmup_seconds": args.warmup,
+              "repeats": args.repeats, "keepalive": args.keepalive,
+              "environment": {"cpus": info["NCPU"], "memory_bytes": info["MemTotal"],
+                              "architecture": info["Architecture"], "kernel": platform.release(),
+                              "docker_version": info["ServerVersion"]}, "images": {}, "runs": []}
+    for tag in ("kong:3.9.4", "redis:7.4-alpine", "grafana/k6:1.3.0"):
+        report["images"][tag] = command(["docker", "image", "inspect", tag, "--format", "{{.Id}}"]).strip()
+    for repeat in range(args.repeats):
+        order = IMPLEMENTATIONS[repeat % 3:] + IMPLEMENTATIONS[:repeat % 3]
+        for workload in ("admitted", "throttled"):
+            for implementation in order:
+                # Daily windows must not reset during a warmup/measured sample.
+                if 86400 - time.time() % 86400 < args.duration + args.warmup + 45:
+                    raise RuntimeError("Too close to UTC day boundary; rerun after the boundary")
+                label = f"{repeat + 1}-{workload}-{implementation}"
+                print(f"Starting {label}", flush=True)
+                fixture = json.loads(configure("prepare", "--implementation", implementation, "--workload", workload))
+                try:
+                    run_k6(fixture, implementation, workload, args.vus, args.warmup, args.keepalive, output / (label + "-warmup.json"))
+                    result = run_k6(fixture, implementation, workload, args.vus, args.duration, args.keepalive, output / (label + ".json"))
+                    report["runs"].append({"repeat": repeat + 1, "workload": workload,
+                                           "implementation": implementation, "plugin": fixture["plugin"],
+                                           "config": fixture["config"], "report": result})
+                    (output / "report.json").write_text(json.dumps(report, indent=2) + "\n")
+                    print(f"Finished {label}: {result['requests_per_second']:,.0f} req/s", flush=True)
+                finally:
+                    configure("cleanup", stdin=json.dumps(fixture["entities"]))
+    (output / "report.md").write_text(markdown(report))
+    print(f"Reports: {output / 'report.json'} and {output / 'report.md'}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

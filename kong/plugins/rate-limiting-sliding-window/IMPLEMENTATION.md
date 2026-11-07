@@ -198,3 +198,22 @@ separate k6 command using round-robin DNS across all three gateways; correctness
 CI does not run k6 or enforce a throughput target. See the
 [test case and benchmark guide](../../../test/README.md) for exact assertions,
 selection commands, benchmark modes, metrics, and coverage limits.
+
+## Bundled-plugin benchmark baseline
+
+`./run.sh benchmark-compare` provisions temporary service-scoped policies for
+Kong's bundled `rate-limiting` and our fixed/approximate sliding windows. All use
+one Redis-backed daily limit on the same ClientId header, with separate admitted
+and pre-exhausted throttled workloads. Kong uses synchronous Redis accounting
+(`sync_rate=-1`) and fails closed on Redis errors. Both configurations have the
+same post-function gateway observer. No production plugin instrumentation is
+added for benchmarks.
+
+The host orchestrator `test/compare_benchmarks.py` runs serial trials with a warmup
+per trial and rotates implementation order across repeats. It retains raw k6
+JSON, policy configuration, source revision, image IDs, and host resource metadata,
+then generates a Markdown report with median throughput, ranges, and per-trial
+latency percentiles. Fixed windows provide the closest comparison; sliding
+windows have different semantics. These end-to-end results include shared-host
+contention and the echo backend for admitted traffic. Benchmarks remain separate
+from correctness CI.

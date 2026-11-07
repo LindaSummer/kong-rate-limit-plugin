@@ -2,6 +2,12 @@ import http from 'k6/http';
 import { check } from 'k6';
 import { Counter } from 'k6/metrics';
 
+const implementation = __ENV.BENCH_IMPLEMENTATION || 'custom';
+const expectedStatus = __ENV.BENCH_EXPECTED_STATUS || 'mixed';
+const expectedLimit = __ENV.BENCH_EXPECTED_LIMIT || '';
+if (!['custom', 'kong'].includes(implementation)) throw new Error('Invalid BENCH_IMPLEMENTATION');
+if (!['mixed', '200', '429'].includes(expectedStatus)) throw new Error('Invalid BENCH_EXPECTED_STATUS');
+
 const target = __ENV.BENCH_URL || 'http://gateway:8000/window/a';
 const clientMode = __ENV.BENCH_CLIENT_MODE || 'shared';
 const keepAlive = (__ENV.BENCH_KEEPALIVE || 'false') === 'true';
@@ -66,7 +72,7 @@ export default function (data) {
     timeout: '5s',
     tags: { name: 'rate-limit-benchmark' },
   });
-  const instance = header(response, 'X-Kong-Instance');
+  const instance = header(response, 'X-Benchmark-Instance') || header(response, 'X-Kong-Instance');
   const mode = header(response, 'X-RateLimit-Mode');
   if (nodes[instance]) nodes[instance].add(1);
   admitted.add(response.status === 200 ? 1 : 0);
@@ -77,7 +83,10 @@ export default function (data) {
   check(response, {
     'status is 200 or 429': (r) => r.status === 200 || r.status === 429,
     'gateway instance identified': () => Boolean(nodes[instance]),
-    'Redis enforcement active': () => mode === 'redis',
+    'configured limiter active': () => implementation === 'kong'
+      ? header(response, 'X-RateLimit-Limit-Day') === expectedLimit
+      : mode === 'redis',
+    'expected response path': (r) => expectedStatus === 'mixed' || r.status === Number(expectedStatus),
   });
 }
 
@@ -95,6 +104,8 @@ export function handleSummary(data) {
   }
   const report = {
     target,
+    implementation,
+    expected_status: expectedStatus,
     client_mode: clientMode,
     keep_alive: keepAlive,
     dns: options.dns,
@@ -105,7 +116,7 @@ export function handleSummary(data) {
     admitted_200: count('admitted_requests'),
     throttled_429: count('throttled_requests'),
     unexpected: count('unexpected_responses'),
-    redis_requests: count('redis_requests'),
+    redis_requests: implementation === 'kong' ? null : count('redis_requests'),
     local_requests: count('local_requests'),
     gateways: distribution,
     latency_ms: values('http_req_duration'),
