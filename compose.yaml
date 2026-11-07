@@ -1,0 +1,124 @@
+name: kong-shared-rate-limiting
+x-kong: &kong
+  image: kong:3.9.4
+  environment: &environment
+    KONG_DATABASE: postgres
+    KONG_PG_HOST: postgres
+    KONG_PG_USER: kong
+    KONG_PG_PASSWORD: kong-demo
+    KONG_PG_DATABASE: kong
+    KONG_PLUGINS: bundled,rate-limiting-sliding-window
+    KONG_PROXY_LISTEN: 0.0.0.0:8000
+    KONG_ADMIN_LISTEN: 0.0.0.0:8001
+    KONG_ADMIN_GUI_LISTEN: "off"
+    KONG_DB_UPDATE_FREQUENCY: "1"
+    KONG_DNS_RESOLVER: 127.0.0.11:53
+    KONG_DNS_NOT_FOUND_TTL: "1"
+    KONG_DNS_ERROR_TTL: "1"
+    KONG_NGINX_WORKER_PROCESSES: "2"
+    KONG_NGINX_HTTP_LUA_SHARED_DICT: sliding_ratelimit 16m
+    KONG_PROXY_ACCESS_LOG: /dev/stdout
+    KONG_PROXY_ERROR_LOG: /dev/stderr
+    KONG_ADMIN_ERROR_LOG: /dev/stderr
+  volumes:
+    - ./kong/plugins/rate-limiting-sliding-window:/usr/local/share/lua/5.1/kong/plugins/rate-limiting-sliding-window:ro
+    - ./test:/test:ro
+  depends_on:
+    migrations:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+  healthcheck:
+    test: [CMD, kong, health]
+    interval: 2s
+    timeout: 5s
+    retries: 60
+    start_period: 20s
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: kong
+      POSTGRES_PASSWORD: kong-demo
+      POSTGRES_DB: kong
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U kong]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  redis:
+    image: redis:7.4-alpine
+    ports: ["127.0.0.1:${REDIS_HOST_PORT:-6380}:6379"]
+    command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+  migrations:
+    <<: *kong
+    command: [kong, migrations, bootstrap]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      disable: true
+  kong1:
+    <<: *kong
+    hostname: kong1
+    networks:
+      default:
+        aliases: [gateway]
+    ports: ["8100:8000", "127.0.0.1:8101:8001"]
+  kong2:
+    <<: *kong
+    hostname: kong2
+    networks:
+      default:
+        aliases: [gateway]
+    ports: ["8200:8000", "127.0.0.1:8201:8001"]
+  kong3:
+    <<: *kong
+    hostname: kong3
+    networks:
+      default:
+        aliases: [gateway]
+    ports: ["8300:8000", "127.0.0.1:8301:8001"]
+  echo:
+    image: python:3.12-slim-trixie
+    command: [python, -u, /test/echo.py]
+    volumes: ["./test:/test:ro"]
+  tests:
+    image: python:3.12-slim-trixie
+    profiles: [test]
+    working_dir: /test
+    command: [python, window_integration.py]
+    volumes: ["./test:/test:ro"]
+  benchmark:
+    image: grafana/k6:1.3.0
+    profiles: [benchmark]
+    working_dir: /test
+    command: [run, /test/benchmark.js]
+    environment:
+      K6_NO_USAGE_REPORT: "true"
+      BENCH_URL: ${BENCH_URL:-http://gateway:8000/window/a}
+      BENCH_VUS: ${BENCH_VUS:-20}
+      BENCH_DURATION: ${BENCH_DURATION:-30s}
+      BENCH_KEEPALIVE: ${BENCH_KEEPALIVE:-false}
+      BENCH_CLIENT_MODE: ${BENCH_CLIENT_MODE:-shared}
+      BENCH_CLIENT_ID: ${BENCH_CLIENT_ID:-}
+    volumes: ["./test:/test:ro"]
+    depends_on:
+      kong1:
+        condition: service_healthy
+      kong2:
+        condition: service_healthy
+      kong3:
+        condition: service_healthy
+volumes:
+  postgres-data:
+  redis-data:

@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+.DS_Store
+.lua-libs/
+.vscode/
+.luarc.json
+/AGENTS.md
+/MEMORY.md
+/kong/plugins/rate-limiting/
