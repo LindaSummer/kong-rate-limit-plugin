@@ -23,7 +23,8 @@ approximate sliding limit of 30 per minute per ClientId, shared across both path
 and all three gateways. The same ClientId uses the same budget regardless of
 which gateway receives the request. Another ClientId has its own budget.
 
-The test command runs Lua syntax/unit checks, Redis hash-field expiry and
+The test command builds a dedicated Python test image with uv and locked pytest
+dependencies, then runs Lua syntax/unit checks, Redis hash-field expiry and
 concurrency checks, isolated shared-memory checks, HTTP integration scenarios,
 Redis failure/recovery, and an actual gateway restart. Tests run sequentially and
 leave the small demo policy installed. Do not run suites or benchmarks
@@ -83,7 +84,7 @@ plugin; put all simultaneous limits into the selected configuration.
 The default service-scoped demo can also be reapplied explicitly:
 
 ```sh
-docker compose run --rm --no-deps tests python window_configure.py
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync python window_configure.py
 curl -i -H 'X-Client-Id: alice' http://localhost:8100/window/a
 curl -i -H 'X-Client-Id: alice' http://localhost:8200/window/b
 ```
@@ -199,7 +200,7 @@ Compose project. Individual tests can be run alone:
 ```sh
 docker compose exec -T kong1 /usr/local/openresty/bin/resty /test/window_unit.lua
 docker compose exec -T kong1 /usr/local/openresty/bin/resty /test/window_redis.lua
-docker compose run --rm --no-deps tests python window_integration.py
+docker compose run --build --rm --no-deps tests uv run --frozen --no-sync pytest -v -m "not restart"
 ```
 
 The plugin requires a `sliding_ratelimit` shared dictionary (Compose allocates

@@ -1,6 +1,6 @@
 # Fixed and approximate sliding-window MVP
 
-Updated: 2026-11-07. Status: pipelined hash-field implementation validated.
+Updated: 2026-11-07. Status: pipelined hash-field MVP and pytest/uv suite validated.
 
 ## Accepted design
 
@@ -149,13 +149,52 @@ shared counters, scope/dimension isolation, schema validation, live updates,
 local memory exhaustion, half-open probes, outages/recovery, upstream headers,
 and restart preservation.
 
-The repository now contains only this custom plugin and its demos/tests. The
-retired token-bucket experiment and editor setup were removed from the commit
-scope. The copied upstream reference and local agent notes remain ignored.
+## Test implementation and verified state
 
-The default startup policy is installed by test/window_configure.py. Test and CI
-entry points run only the retained window-plugin suite. An isolated export of the
-staged files passed syntax checks for 12 Lua files, 13,821 unit assertions, three
-shared-memory groups, six Redis groups, 13 gateway scenarios, and a restart check.
-The optional deployment image built successfully and contains only this custom
-plugin. Python/shell syntax, Compose configuration, and actionlint also passed.
+The standalone repository contains this custom plugin and its tests under `test/`.
+The optional root Dockerfile adds only the plugin to the official Kong image.
+Compose runs official Kong images directly; a separate `test/Dockerfile` builds
+only the Python test environment. The retired token-bucket experiment is removed.
+Local Lua IDE settings, type bridges, runtime libraries, and agent notes remain
+Git-ignored and excluded from Docker build context.
+
+The test image uses Python 3.12 and uv 0.9.4. `test/pyproject.toml` declares pytest;
+`test/uv.lock` currently locks pytest 8.4.2 and its transitive dependencies.
+`uv sync --locked --no-dev` installs them at image build time into `/opt/test-venv`.
+Python commands use `uv run --frozen --no-sync`; the `/test` source mount remains
+read-only and pytest's writable cache lives under `/tmp`.
+
+`./run.sh test` builds the test image once and runs these stages sequentially:
+
+1. LuaJIT syntax, deterministic Lua unit checks including parameter sweeps, isolated real shared-memory
+   checks, and real Redis pipeline/field-expiry checks.
+2. Fourteen named pytest gateway cases in `test/test_integration.py`, including
+   parameterized fixed/sliding budgets, outages, and upstream 429/503 responses.
+3. `test/window_restart.py prepare` creates a Redis-backed sliding budget and
+   consumes one admission. The host runner restarts `kong1` and waits for health.
+4. Pytest explicitly selects the `restart`-marked verifier in
+   `test/test_restart.py`; it verifies the remaining shared budget and cleans up.
+5. `test/window_configure.py` reinstalls the default service-scoped policy.
+
+`test/conftest.py` supplies a function-scoped policy factory. Each gateway case
+tracks and removes its own plugins, routes, and services even if setup or an
+assertion fails. The schema case creates its own policy rather than depending
+on another test. Shared helpers live in `test/window_support.py` and
+`test/common.py`. Default pytest selection excludes the restart verifier because
+it requires the preceding preparation and host restart. Do not run cases in
+parallel: outage tests pause the shared Redis instance.
+
+Verified on 2026-11-07: Lua syntax and unit checks, real shared-memory and Redis
+checks, pytest gateway scenarios, and restart verification passed. Parameter
+sweeps repeat checks with different inputs; their iterations are not reported as
+separate test cases. The uv image built, the updated startup command
+passed, and default collection selected 14 of 15 Python cases. Lockfile consistency,
+Python/shell syntax, Compose configuration, and documentation links passed.
+The optional plugin deployment image and integration workflow were also validated
+before the Python migration; their plugin behavior and workflow are unchanged.
+
+GitHub Actions uses the same start/test/stop entry points. Benchmarks remain a
+separate k6 command using round-robin DNS across all three gateways; correctness
+CI does not run k6 or enforce a throughput target. See the
+[test case and benchmark guide](../../../test/README.md) for exact assertions,
+selection commands, benchmark modes, metrics, and coverage limits.

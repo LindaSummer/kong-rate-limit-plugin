@@ -8,3 +8,9 @@ __pycache__/
 /AGENTS.md
 /MEMORY.md
 /kong/plugins/rate-limiting/
+
+.venv/
+.pytest_cache/
+
+/types/
+/scripts/setup-lua.sh
