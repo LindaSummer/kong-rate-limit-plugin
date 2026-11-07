@@ -1,0 +1,33 @@
+# Optional CI benchmark caps. CPU quotas are shared, not pinned cores.
+services:
+  kong1:
+    ports: !reset []
+    cpus: 0.5
+    mem_limit: 768m
+  kong2:
+    ports: !reset []
+    cpus: 0.5
+    mem_limit: 768m
+  kong3:
+    ports: !reset []
+    cpus: 0.5
+    mem_limit: 768m
+  redis:
+    ports: !reset []
+    cpus: 0.5
+    mem_limit: 256m
+  postgres:
+    cpus: 0.5
+    mem_limit: 512m
+  echo:
+    cpus: 0.5
+    mem_limit: 256m
+  benchmark:
+    cpus: 1.0
+    mem_limit: 512m
+  tests:
+    cpus: 0.25
+    mem_limit: 256m
+  migrations:
+    cpus: 0.5
+    mem_limit: 768m

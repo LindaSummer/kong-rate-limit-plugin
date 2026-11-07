@@ -2,7 +2,7 @@
 set -eu
 cd "$(dirname "$0")"
 
-compose() { docker compose -f compose.yaml "$@"; }
+compose() { docker compose "$@"; }
 
 start() {
   compose up -d --wait

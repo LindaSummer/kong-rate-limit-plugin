@@ -198,8 +198,8 @@ installed policies or reset counters. Reusing a base ClientId can reuse budgets.
 
 ### Compare against Kong's bundled plugin
 
-The [recorded baseline report](benchmarks/2026-11-07-redis-baseline.md) contains
-measured results and links to the raw trials for the recorded source revision.
+Measured reports belong in PR conversations and Actions artifacts, not Git.
+The output directory is local; generated report directories under `test/` are ignored.
 
 ```sh
 ./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
@@ -208,11 +208,14 @@ measured results and links to the raw trials for the recorded source revision.
 
 This command also requires host Python 3 (standard library only). It starts the
 stack, builds the uv test image, and creates temporary service-scoped policies
-for the bundled `rate-limiting` plugin and our fixed/sliding implementations.
+for the bundled `rate-limiting` plugin in sync and async modes and our
+fixed/sliding implementations.
 It preserves existing demo policies and removes each trial's entities afterward.
 
-All three use one daily limit on `X-Client-Id`, backed by the same Redis. The
-bundled plugin uses `policy=redis`, `sync_rate=-1`, and `fault_tolerant=false`.
+All four modes use one daily limit on `X-Client-Id`, backed by the same Redis. The
+bundled plugin uses `policy=redis` and `fault_tolerant=false`. Sync uses
+`sync_rate=-1`; async defaults to `sync_rate=0.1` seconds, configurable with
+`--kong-async-sync-rate`. Our implementations both use synchronous Redis accounting.
 Our limit uses `[client_id]`, `window_ms=86400000`, and the selected algorithm.
 The daily window avoids short reset boundaries during samples. Trials refuse
 to start too close to the UTC day boundary.
@@ -226,26 +229,70 @@ Two workloads isolate response paths:
 
 Each trial has a separate warmup followed by a measured sample. Fresh policies
 and caller identities prevent carryover between trials. Runs are serial, and
-implementation order rotates across repeats. Both plugins receive the same
+implementation order rotates across repeats. All modes receive the same
 `post-function` header observer to identify gateways on 200 and 429 responses.
 All three gateways must receive traffic. Custom responses must report Redis
 mode; the baseline's standard limit header is checked because the bundled
 plugin does not expose an equivalent mode header. Baseline `redis_requests` is
 `null`, rather than claiming an observed Redis-mode count.
 
+Async caches are per worker. For throttled traffic, preparation waits until
+responses settle at 429 across gateways before warmup. This excludes transient
+priming admissions from the measurements. Async throughput has different quota
+consistency guarantees; this comparison does not measure async overshoot.
+
 The output directory contains raw warmup/measured JSON and stderr logs,
-`report.json` with environment/image IDs, source revision, per-trial policies and
-results, and `report.md` suitable for a PR comment. Warmups are excluded from
+`report.json` with host CPU/RAM, configured container CPU/memory/pinning settings,
+observed settings for persistent containers, image IDs, source revision, per-trial
+policies and results, and `report.md` suitable for a PR comment. Warmups are excluded from
 reported rates. Summary tables use median request rates with min/max ranges;
 latency columns are medians of per-trial p95/p99 values, not pooled percentiles.
 Use `--keepalive` for a separate connection-reuse experiment; defaults open a
 new connection per request. Do not mix keepalive settings in one comparison.
 
-The fixed-window comparison is the closest functional baseline. Sliding windows
+Ratios in the table use Kong sync as the denominator. The fixed-window
+comparison with Kong sync is the closest functional baseline. Sliding windows
 perform different accounting, so their result measures that implementation's
 cost rather than equivalent quota accuracy. All containers share the host without
 CPU pinning, and admitted requests include Python echo processing. Interpret
 results as end-to-end measurements for the recorded host and settings.
+
+### Automatic PR benchmark and resource settings
+
+[The benchmark workflow](../.github/workflows/benchmark.yml) runs automatically on
+PR creation, new commits, reopening, and readiness for review, and supports manual
+dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
+three repeats, and a 0.1-second Kong async interval. It runs independently of the
+correctness suite on an isolated Compose project.
+
+The workflow sets `COMPOSE_FILE=compose.yaml:compose.benchmark.yaml`. The
+[benchmark overlay](../compose.benchmark.yaml) applies these per-container caps:
+
+| Service | CPU quota | Memory limit |
+| --- | ---: | ---: |
+| Each Kong node (two workers) | 0.5 CPU | 768 MiB |
+| Redis | 0.5 CPU | 256 MiB |
+| PostgreSQL | 0.5 CPU | 512 MiB |
+| Echo backend | 0.5 CPU | 256 MiB |
+| k6 | 1 CPU | 512 MiB |
+| Python helpers | 0.25 CPU | 256 MiB |
+| Migrations (startup only) | 0.5 CPU | 768 MiB |
+
+These are quotas, not dedicated cores; CPUs are not pinned. The report captures
+the actual runner CPU count and RAM instead of assuming a hosted-runner size.
+Local runs without the overlay remain uncapped and explicitly report that.
+To reproduce CI caps locally, use an isolated project or stop other runs before
+setting the same `COMPOSE_FILE` environment variable. Do not apply the overlay
+to an active demo as an incidental test step.
+
+The workflow uploads Markdown, raw JSON, and logs as `rate-limit-benchmark`
+artifacts for seven days and adds the report to the job summary. A separate job
+with no source checkout creates or updates one bot comment in the PR, linking the
+artifacts. Failed runs also update the comment with status and available logs;
+an older revision cannot replace the current head's comment. Comment publishing
+is enabled for same-repository PRs. Fork PRs run the benchmark and upload artifacts,
+but GitHub's read-only fork token cannot post the comment. No repository secrets
+are required. The report job reads artifact text as data and does not execute it.
 
 ### DNS and connection behavior
 
@@ -293,4 +340,5 @@ Sliding-window checks validate the two-counter approximation, not an exact rolli
 window. The suite does not establish a strict global quota during Redis outages,
 recovery, clock skew, or configuration propagation: fallback budgets are per node.
 It does not cover async synchronization, Redis Cluster, or production-scale
-capacity. GitHub Actions runs the correctness suite; k6 benchmarks are separate.
+capacity. GitHub Actions runs correctness and benchmarks in separate workflows;
+benchmark reports are not throughput gates.

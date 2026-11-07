@@ -13,3 +13,6 @@ kong/plugins/rate-limiting/
 
 types/
 scripts/setup-lua.sh
+
+test/benchmarks/
+test/reports/

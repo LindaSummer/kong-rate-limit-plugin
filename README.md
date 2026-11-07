@@ -294,7 +294,10 @@ To compare the bundled Kong Redis limiter against our fixed and sliding windows:
 
 This uses temporary policies, separate admitted/throttled workloads, and rotating
 serial trials. It requires host Python 3 and writes raw JSON plus a Markdown
-comparison report. See the [comparison methodology](test/README.md#compare-against-kongs-bundled-plugin).
+comparison report. A separate [PR benchmark workflow](.github/workflows/benchmark.yml)
+runs Kong sync/async and both custom windows automatically with explicit CPU/memory
+caps, uploads raw reports, and updates the PR conversation. Results are not
+committed. See the [comparison methodology](test/README.md#compare-against-kongs-bundled-plugin).
 
 Environment defaults: `BENCH_VUS=20`, `BENCH_DURATION=30s`,
 `BENCH_KEEPALIVE=false`, `BENCH_CLIENT_MODE=shared`. `BENCH_CLIENT_ID` optionally
