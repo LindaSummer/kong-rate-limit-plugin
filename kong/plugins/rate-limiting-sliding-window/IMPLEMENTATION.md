@@ -217,3 +217,8 @@ latency percentiles. Fixed windows provide the closest comparison; sliding
 windows have different semantics. These end-to-end results include shared-host
 contention and the echo backend for admitted traffic. Benchmarks remain separate
 from correctness CI.
+
+The [2026-11-07 report](../../../test/benchmarks/2026-11-07-redis-baseline.md)
+records the initial measured baseline. Throttled throughput was lower for the
+custom plugin; admitted trial ranges overlapped substantially. It includes raw
+trial data and limits the interpretation to the measured single-limit workloads.

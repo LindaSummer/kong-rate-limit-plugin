@@ -198,6 +198,9 @@ installed policies or reset counters. Reusing a base ClientId can reuse budgets.
 
 ### Compare against Kong's bundled plugin
 
+The [recorded baseline report](benchmarks/2026-11-07-redis-baseline.md) contains
+measured results and links to the raw trials for the recorded source revision.
+
 ```sh
 ./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
   --output /tmp/kong-rate-limit-comparison
