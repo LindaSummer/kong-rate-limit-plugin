@@ -202,7 +202,7 @@ Measured reports belong in PR conversations and Actions artifacts, not Git.
 The output directory is local; generated report directories under `test/` are ignored.
 
 ```sh
-./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
+./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 --keepalive \
   --output /tmp/kong-rate-limit-comparison
 ```
 
@@ -262,9 +262,10 @@ latency columns are medians of per-trial p95/p99 values, not pooled percentiles.
 The CI and full local comparisons use `--keepalive` and an HTTP/1.1 echo backend
 to avoid exhausting client source ports in direct-backend samples. The echo
 server disables Nagle so small persistent responses do not incur an artificial
-delayed-ACK wait. The harness
-still defaults to opening a new connection per request for explicit connection
-cost experiments; do not mix these settings in one comparison.
+delayed-ACK wait. The comparison defaults to keepalive; `--no-keepalive` is available for explicit
+connection-churn experiments, which can hit source-port limits. The standalone
+`./run.sh benchmark` keeps its original new-connection default. Do not mix these
+settings in one comparison.
 
 Ratios in the table use Kong sync as the denominator. The fixed-window
 comparison with Kong sync is the closest functional baseline. Sliding windows

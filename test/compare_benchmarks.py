@@ -141,7 +141,8 @@ def main():
     parser.add_argument("--duration", type=int, default=15, help="Measured seconds per trial")
     parser.add_argument("--warmup", type=int, default=3, help="Warmup seconds per trial")
     parser.add_argument("--repeats", type=int, default=3)
-    parser.add_argument("--keepalive", action="store_true")
+    parser.add_argument("--keepalive", action=argparse.BooleanOptionalAction, default=True,
+                        help="Reuse HTTP connections (default); disable for connection-churn experiments")
     parser.add_argument("--kong-async-sync-rate", type=float, default=0.1, help="Async Redis sync interval in seconds")
     parser.add_argument("--output", type=Path, default=Path("/tmp/kong-rate-limit-comparison"))
     args = parser.parse_args()

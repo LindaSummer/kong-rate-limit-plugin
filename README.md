@@ -288,7 +288,7 @@ docker compose run --rm --no-deps benchmark run --vus 20 --duration 30s /test/be
 To compare the bundled Kong Redis limiter against our fixed and sliding windows:
 
 ```sh
-./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 \
+./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 --keepalive \
   --output /tmp/kong-rate-limit-comparison
 ```
 
