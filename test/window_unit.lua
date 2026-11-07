@@ -2,10 +2,8 @@ local root = "kong.plugins.rate-limiting-sliding-window."
 local algorithms = require(root .. "algorithms")
 local calculate = algorithms.calculate
 local identity = require(root .. "identity")
-local cases = 0
 local function check(value, message)
   assert(value, message)
-  cases = cases+1
 end
 local function rule(algorithm, limit, window)
   return {algorithm=algorithm or "fixed_window", limit=limit or 3,
@@ -210,4 +208,4 @@ handler:access(request_conf)
 check(local_calls == 3 and report_success == false, "authentication errors fall back and open circuit")
 local_error = "no memory"
 check(handler:access(request_conf) == 503, "503 only when local enforcement also fails")
-print("PASS window unit assertions: " .. cases)
+print("PASS window unit checks (including parameter sweeps)")

@@ -166,7 +166,7 @@ read-only and pytest's writable cache lives under `/tmp`.
 
 `./run.sh test` builds the test image once and runs these stages sequentially:
 
-1. LuaJIT syntax, deterministic Lua unit assertions, isolated real shared-memory
+1. LuaJIT syntax, deterministic Lua unit checks including parameter sweeps, isolated real shared-memory
    checks, and real Redis pipeline/field-expiry checks.
 2. Fourteen named pytest gateway cases in `test/test_integration.py`, including
    parameterized fixed/sliding budgets, outages, and upstream 429/503 responses.
@@ -184,9 +184,10 @@ on another test. Shared helpers live in `test/window_support.py` and
 it requires the preceding preparation and host restart. Do not run cases in
 parallel: outage tests pause the shared Redis instance.
 
-Verified on 2026-11-07: syntax checks for 12 Lua files, 13,821 unit assertions,
-three real shared-memory groups, six Redis groups, 14 pytest gateway cases, and
-one pytest restart case passed. The uv image built, the updated startup command
+Verified on 2026-11-07: Lua syntax and unit checks, real shared-memory and Redis
+checks, pytest gateway scenarios, and restart verification passed. Parameter
+sweeps repeat checks with different inputs; their iterations are not reported as
+separate test cases. The uv image built, the updated startup command
 passed, and default collection selected 14 of 15 Python cases. Lockfile consistency,
 Python/shell syntax, Compose configuration, and documentation links passed.
 The optional plugin deployment image and integration workflow were also validated

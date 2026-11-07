@@ -24,9 +24,8 @@ default policy. The suite temporarily pauses Redis, flushes its Lua script cache
 and creates temporary Kong entities. Do not run tests or benchmarks concurrently
 against the same Compose project. `stop` retains PostgreSQL and Redis volumes.
 
-The current suite passed on 2026-11-07: 12 Lua files compiled, 13,821 unit
-assertions, three shared-memory groups, six Redis groups, 14 pytest gateway cases,
-and one pytest restart case. Fixed/sliding algorithms and upstream 429/503
+The current suite passed on 2026-11-07: Lua syntax and unit checks, shared-memory
+and Redis checks, pytest gateway scenarios, and restart verification. Fixed/sliding algorithms and upstream 429/503
 responses have separate parameterized cases. Default pytest selection runs the
 14 gateway cases; the runner selects the restart case after restarting `kong1`.
 
@@ -52,6 +51,9 @@ responses have separate parameterized cases. Default pytest selection runs the
 
 `window_unit.lua` supplies explicit timestamps. Storage and locking are mocked
 where needed; algorithm and identity calculations use the actual plugin modules.
+Some checks repeat the same scenario with different input parameters; the script
+reports a pass for the unit suite without presenting those repetitions as
+additional test cases.
 
 | Area | Assertions |
 | --- | --- |
