@@ -145,6 +145,9 @@ def main():
         parser.error("Each trial must be at most 120 seconds to keep the admitted budget practical")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    # The benchmark profile is not started by compose up. A fresh runner has
+    # never pulled k6, but image provenance is collected before its first run.
+    command(COMPOSE + ["pull", "benchmark"])
     info = json.loads(command(["docker", "info", "--format", "{{json .}}"]))
     report = {"timestamp_utc": datetime.now(timezone.utc).isoformat(),
               "revision": command(["git", "rev-parse", "HEAD"]).strip(),
