@@ -50,7 +50,6 @@ services:
       retries: 30
   redis:
     image: redis:7.4-alpine
-    ports: ["127.0.0.1:${REDIS_HOST_PORT:-6380}:6379"]
     command: [redis-server, --appendonly, "yes", --maxmemory-policy, noeviction]
     volumes:
       - redis-data:/data
@@ -73,21 +72,18 @@ services:
     networks:
       default:
         aliases: [gateway]
-    ports: ["8100:8000", "127.0.0.1:8101:8001"]
   kong2:
     <<: *kong
     hostname: kong2
     networks:
       default:
         aliases: [gateway]
-    ports: ["8200:8000", "127.0.0.1:8201:8001"]
   kong3:
     <<: *kong
     hostname: kong3
     networks:
       default:
         aliases: [gateway]
-    ports: ["8300:8000", "127.0.0.1:8301:8001"]
   echo:
     image: python:3.12-slim-trixie
     command: [python, -u, /test/echo.py]
