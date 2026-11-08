@@ -8,7 +8,7 @@ Redis provides shared counters across gateway nodes using atomic per-bucket oper
 
 During Redis failures, this MVP deliberately prioritizes availability by switching to independent node-local budgets. Local consumption is not reconciled with Redis, so a strict global quota is not guaranteed during outages or recovery.
 
-## Design for the distributed rate limiting
+## Design for distributed rate limiting
 
 ### Requirements
 
@@ -24,8 +24,8 @@ The assignment targets consistent enforcement of the shared quota. This MVP uses
 
 #### Environment for MVP
 
-Since it is a MVP and POC, we should leverage current infra as mush as we could to focus the core logic of rate limit.
-So use curreent Kong with a customer plugin should be a good choice for the MVP.
+Since this is an MVP and proof of concept, we should reuse existing infrastructure as much as possible to focus on the core rate-limiting logic.
+Using Kong with a custom plugin is therefore a good choice for the MVP.
 
 ### Architecture for MVP
 
@@ -74,29 +74,29 @@ Kong proxies admitted traffic to upstream services and preserves their
 
 ### Tradeoffs
 
-1. Supporting the http protocol with different requirements (maybe we have more in future) is complex and not the most valuable for the MVP.
-So we should leverate exsiting Kong mature capabilities for handling HTTP protocol requirements instead of implementing them ourselves.
+1. Supporting HTTP with different requirements (and possibly more in the future) is complex and is not the most valuable work for the MVP.
+We should therefore use Kong's existing, mature HTTP capabilities instead of implementing them ourselves.
 
-2. Current Kong's rate limiting plugin only supports fixed window, and make a sliding window implementation should be a good enhancement for more accurate rate limiting. And this existing plugin prodvides a good baseline of performance.
+2. Kong's current rate-limiting plugin only supports fixed windows, so adding a sliding-window implementation would be a useful enhancement for more accurate rate limiting. The existing plugin also provides a good performance baseline.
 
-3. For the consistency, the more strict consistency will lead to higher latency and potential performance trade-offs, while weaker consistency may improve performance but at the cost of potential rate limit violations in distributed scenarios.
+3. Stricter consistency can increase latency and introduce performance tradeoffs, while weaker consistency may improve performance at the cost of potential rate-limit violations in distributed scenarios.
 
-In our scenario, as a middleware in gateway, the performance and avalibility are most critical and mandatory. So we could make a weaker consistency
-for better performance once the redis MVP is validated.
+In our gateway middleware scenario, performance and availability are the most critical and mandatory goals. We could therefore accept weaker consistency
+for better performance once the Redis MVP is validated.
 
-4. Integration tests and baseline performance test with kong's existing rate limiting plugin should be conducted to ensure the custom plugin meets the required performance and correctness standards.
+4. Integration tests and baseline performance tests against Kong's existing rate-limiting plugin should be conducted to ensure the custom plugin meets the required performance and correctness standards.
 
-### Detail design for each component
+### Detailed design for each component
 
 #### Matching Rule and Dynamic Configuration
 
-The matching rule could be covered by kong `route` or `service` definitions. So this requirement and the dynamic configuration could be handled by Kong itself, while the rate limiting logic would be implemented in the custom plugin.
+Matching rules can be covered by Kong's `route` or `service` definitions. This requirement and dynamic configuration can therefore be handled by Kong itself, while rate-limiting logic is implemented in the custom plugin.
 
 #### Rate Limiting Algorithm Choice
 
-After reading the exsiting plugin in [kong](https://github.com/Kong/kong/blob/21032122ab80c973f368f6bc539f53985e7164e8/kong/plugins/rate-limiting/policies/init.lua#L366-L439) and [treafik](https://github.com/traefik/traefik/blob/master/pkg/middlewares/ratelimiter/redis_limiter.go), kong uses fixed window and treafil uses buckets.
+After reviewing the existing [Kong plugin](https://github.com/Kong/kong/blob/21032122ab80c973f368f6bc539f53985e7164e8/kong/plugins/rate-limiting/policies/init.lua#L366-L439) and [Traefik limiter](https://github.com/traefik/traefik/blob/master/pkg/middlewares/ratelimiter/redis_limiter.go), we found that Kong uses fixed windows and Traefik uses buckets.
 
-In [kong advanced rate limiting](https://developer.konghq.com/plugins/rate-limiting-advanced/), it suports both fixed and sliding window algorithms.
+[Kong Advanced Rate Limiting](https://developer.konghq.com/plugins/rate-limiting-advanced/) supports both fixed and sliding-window algorithms.
 
 The MVP implements both fixed and approximate sliding windows. Fixed windows provide a direct baseline against Kong's bundled limiter. Sliding windows estimate usage from the current and previous windows to reduce boundary effects; they do not enforce an exact rolling-window quota.
 
@@ -130,25 +130,26 @@ Redis errors alone do not make requests unavailable. Local enforcement can still
 4. Added benchmarks against Kong's bundled synchronous and asynchronous Redis limiter, plus direct-upstream and plugin-free controls.
 
 
-#### Future plan need for a really production ready one
+#### Future work for production readiness
 
 1. Profile the synchronous request path, including circuit-breaker lock contention and JSON state reads/writes. Investigate reducing unchanged-state writes while preserving failure fencing and the single-probe guarantee. These are optimization candidates; the current benchmarks do not isolate their individual costs.
-2. Support async mode to use weaker consistency for better performance. It depends on the performance report we get in kong's sync and async modes.
-3. If the async optimization couldn't achieve the desired performance improvement, optimize the performance of the rate limiting plugin, potentially through techniques such as sharding, sub-windows, and local caching to reduce the impact of Redis network and Lua engine overhead under high traffic conditions.
-We have a example could learn from, [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
-4. Add metrics and monitoring to track the performance and effectiveness of the rate limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. It will be great to integrate with opentelemetry for centralized observability.
+2. Support async mode with weaker consistency for better performance. This depends on the benchmark results for Kong's sync and async modes.
+3. If async optimization does not achieve the desired performance improvement, optimize the rate-limiting plugin through techniques such as sharding, sub-windows, and local caching to reduce Redis network and Lua engine overhead under high traffic conditions.
+   We can learn from an example: [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
+4. Add metrics and monitoring to track the performance and effectiveness of the rate-limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. Integrating with OpenTelemetry would support centralized observability.
 
-##### The benchmark of current plugin and kong's
+##### Benchmark comparison with Kong
 
-Here are benchmark in [my local host](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6708567152) and in [github action](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6709115520)
+Benchmark reports are available for [my local host](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6708567152) and [GitHub Actions](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6709115520).
 
-From the benchamrk report, I find that the performance in async mode is generally better than in sync mode, especially under high traffic conditions. However, the exact improvement depends on the specific workload and configuration.
+From the benchmark report, I find that performance in async mode is generally better than in sync mode, especially under high traffic conditions. However, the exact improvement depends on the specific workload and configuration.
 
 Here is the environment and setup for the benchmark:
+
 - Kong 3.9.4, Redis 7.4, k6 1.3.0; three Kong nodes with two workers each.
 - Docker host: 32 logical CPUs, 123.4 GiB RAM, x86_64.
 
-In first version, I leverage the integration python test case into benchmark, but the sync and async don't have much difference in performance under the tested scenarios.
+In the first version, I reused the Python integration test setup for benchmarking, but sync and async modes showed little performance difference under the tested scenarios.
 
 | Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
@@ -163,7 +164,7 @@ In first version, I leverage the integration python test case into benchmark, bu
 | throttled | Custom fixed_window | 38,700 (38,298–39,194) | 0.60× | 1.458 | 2.946 | 0 / 1,162,166 |
 | throttled | Custom sliding_window | 39,312 (38,487–39,406) | 0.61× | 1.419 | 2.949 | 0 / 1,172,392 |
 
-Then I changed to a go http server and the performance improved significantly.
+Then I changed to a Go HTTP server, and performance improved significantly.
 The faster upstream makes the performance difference between synchronous and asynchronous accounting more visible.
 
 | Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
@@ -179,14 +180,14 @@ The faster upstream makes the performance difference between synchronous and asy
 | throttled | Custom fixed_window | 37,330 (37,062–38,026) | 0.58× | 1.526 | 3.029 | 0 / 1,124,631 |
 | throttled | Custom sliding_window | 38,421 (37,856–38,526) | 0.59× | 1.483 | 2.983 | 0 / 1,148,274 |
 
-This makes the asynchronous optimization work and significantly improves the request throughput compared to the synchronous approach, especially when the Redis IO becomes the major bottleneck.
+This makes the asynchronous optimization work and significantly improves request throughput compared to the synchronous approach, especially when Redis I/O becomes the major bottleneck.
 
 So async accounting is the next performance optimization to evaluate, with explicit bounds on overshoot and counter loss.
 
 
 ## How to use and test this plugin
 
-__This part is primarily assistanted by Codex.__
+__This section was prepared primarily with assistance from Codex.__
 
 A standalone custom Kong plugin with fixed and approximate sliding windows,
 shared Redis counters, and node-local rate limiting during Redis failures.
