@@ -131,6 +131,46 @@ During fallback, use half-open strategy to gradually allow traffic back to Redis
 We have a example could learn from, [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
 3. Add metrics and monitoring to track the performance and effectiveness of the rate limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. It will be great to integrate with opentelemetry for centralized observability.
 
+##### The benchmark of current plugin and kong's
+
+Here are benchmark in [my local host](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6708567152) and in [github action](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6709115520)
+
+From the benchamrk report, I find that the performance in async mode is generally better than in sync mode, especially under high traffic conditions. However, the exact improvement depends on the specific workload and configuration.
+
+In first version, I leverage the integration python test case into benchmark, but the sync and async don't have much difference in performance under the tested scenarios.
+
+| Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| admitted | Direct echo backend | 14,384 (14,359–14,401) | 1.56× | 2.844 | 3.909 | 431,487 / 0 |
+| admitted | Kong without plugins | 9,830 (9,788–9,833) | 1.06× | 4.159 | 5.670 | 294,551 / 0 |
+| admitted | Kong sync | 9,240 (9,157–9,277) | 1.00× | 4.288 | 5.778 | 276,778 / 0 |
+| admitted | Kong async | 9,641 (9,600–9,702) | 1.04× | 4.240 | 5.795 | 289,480 / 0 |
+| admitted | Custom fixed_window | 9,253 (9,205–9,316) | 1.00× | 4.290 | 5.834 | 277,781 / 0 |
+| admitted | Custom sliding_window | 9,258 (9,219–9,282) | 1.00× | 4.308 | 5.816 | 277,640 / 0 |
+| throttled | Kong sync | 64,850 (64,585–64,940) | 1.00× | 0.512 | 1.035 | 0 / 1,943,962 |
+| throttled | Kong async | 85,918 (85,762–86,517) | 1.32× | 0.343 | 0.676 | 0 / 2,582,635 |
+| throttled | Custom fixed_window | 38,700 (38,298–39,194) | 0.60× | 1.458 | 2.946 | 0 / 1,162,166 |
+| throttled | Custom sliding_window | 39,312 (38,487–39,406) | 0.61× | 1.419 | 2.949 | 0 / 1,172,392 |
+
+Then I changed to a go http server and the performance improved significantly. The redis IO cost now becomes the major bottleneck in the rate limiting process.
+
+| Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| admitted | Direct Go backend | 95,889 (94,606–97,007) | 3.08× | 0.185 | 0.524 | 2,876,855 / 0 |
+| admitted | Kong without plugins | 62,717 (62,448–62,740) | 2.02× | 0.378 | 0.831 | 1,879,126 / 0 |
+| admitted | Kong sync | 31,095 (31,074–31,809) | 1.00× | 1.225 | 2.214 | 939,919 / 0 |
+| admitted | Kong async | 56,393 (56,375–56,565) | 1.81× | 0.539 | 1.107 | 1,693,445 / 0 |
+| admitted | Custom fixed_window | 32,324 (32,106–33,599) | 1.04× | 1.579 | 3.105 | 980,445 / 0 |
+| admitted | Custom sliding_window | 32,987 (32,074–33,244) | 1.06× | 1.572 | 3.055 | 983,282 / 0 |
+| throttled | Kong sync | 64,696 (64,335–65,106) | 1.00× | 0.516 | 1.042 | 0 / 1,941,525 |
+| throttled | Kong async | 85,383 (85,151–85,761) | 1.32× | 0.346 | 0.676 | 0 / 2,563,319 |
+| throttled | Custom fixed_window | 37,330 (37,062–38,026) | 0.58× | 1.526 | 3.029 | 0 / 1,124,631 |
+| throttled | Custom sliding_window | 38,421 (37,856–38,526) | 0.59× | 1.483 | 2.983 | 0 / 1,148,274 |
+
+This makes the asynchronous optimization work and significantly improves the request throughput compared to the synchronous approach, especially when the Redis IO becomes the major bottleneck.
+
+So the asynchronous optimization is mandatory before this plugin becomes production-ready.
+
 
 ## How to use and test this plugin
 
