@@ -37,7 +37,7 @@ jobs:
       - name: Run serial benchmark comparison
         run: |
           ./run.sh benchmark-compare --vus 10 --duration 10 --warmup 2 --repeats 3 --keepalive \
-            --kong-async-sync-rate 0.1 --output "$RUNNER_TEMP/benchmark-report" \
+            --kong-async-sync-rate 0.1 --redis-timeout-ms 1000 --output "$RUNNER_TEMP/benchmark-report" \
             2>&1 | tee "$RUNNER_TEMP/benchmark-report/runner.log"
 
       - name: Add report to job summary
@@ -55,6 +55,10 @@ jobs:
           docker compose config > "$RUNNER_TEMP/benchmark-report/compose.yaml" 2>&1 || true
           docker compose ps --all > "$RUNNER_TEMP/benchmark-report/containers.log" 2>&1 || true
           docker compose logs --no-color --tail 300 > "$RUNNER_TEMP/benchmark-report/compose.log" 2>&1 || true
+          # Request-volume tails can hide the first warning that opened a circuit.
+          docker compose logs --no-color kong1 kong2 kong3 2>&1 \
+            | rg '\[(warn|error|crit|alert|emerg)\]|fallback|unavailable' \
+            > "$RUNNER_TEMP/benchmark-report/gateway-errors.log" || true
 
       - name: Stop benchmark stack
         if: always()

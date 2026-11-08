@@ -20,7 +20,7 @@ def cleanup(entities):
         raise AssertionError("Benchmark cleanup failed: " + "; ".join(errors))
 
 
-def prepare(implementation, workload, sync_rate=0.1):
+def prepare(implementation, workload, sync_rate=0.1, redis_timeout_ms=1000):
     entities = {"plugins": [], "routes": [], "services": []}
     name = "benchmark-" + uuid.uuid4().hex
     path = "/" + name
@@ -39,11 +39,11 @@ def prepare(implementation, workload, sync_rate=0.1):
         config = {"day": threshold, "limit_by": "header",
                   "header_name": "X-Client-Id", "policy": "redis",
                   "sync_rate": -1 if implementation == "kong_sync" else sync_rate, "fault_tolerant": False,
-                  "redis": {"host": "redis", "port": 6379, "timeout": 150}}
+                  "redis": {"host": "redis", "port": 6379, "timeout": redis_timeout_ms}}
     else:
         plugin_name = "rate-limiting-sliding-window"
         config = {"client_id_header": "X-Client-Id",
-                  "redis": {"host": "redis", "port": 6379, "timeout": 150},
+                  "redis": {"host": "redis", "port": 6379, "timeout": redis_timeout_ms},
                   "limits": [{"algorithm": implementation, "window_ms": 86400000,
                               "limit": threshold, "dimensions": ["client_id"]}]}
     try:
@@ -107,12 +107,15 @@ if __name__ == "__main__":
     parser.add_argument("--implementation", choices=["direct", "no_plugin", "kong_sync", "kong_async", "fixed_window", "sliding_window"])
     parser.add_argument("--workload", choices=["admitted", "throttled"])
     parser.add_argument("--sync-rate", type=float, default=0.1)
+    parser.add_argument("--redis-timeout-ms", type=int, default=1000)
     args = parser.parse_args()
     if args.sync_rate < 0.02:
         parser.error("Async sync-rate must be at least 0.02 seconds")
+    if not 1 <= args.redis_timeout_ms <= 60000:
+        parser.error("redis-timeout-ms must be between 1 and 60000")
     if args.action == "cleanup":
         cleanup(json.load(sys.stdin))
     else:
         if not args.implementation or not args.workload:
             parser.error("prepare requires --implementation and --workload")
-        print(json.dumps(prepare(args.implementation, args.workload, args.sync_rate)))
+        print(json.dumps(prepare(args.implementation, args.workload, args.sync_rate, args.redis_timeout_ms)))

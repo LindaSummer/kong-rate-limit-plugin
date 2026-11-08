@@ -216,6 +216,10 @@ All four limiter modes use one daily limit on `X-Client-Id`, backed by the same 
 bundled plugin uses `policy=redis` and `fault_tolerant=false`. Sync uses
 `sync_rate=-1`; async defaults to `sync_rate=0.1` seconds, configurable with
 `--kong-async-sync-rate`. Our implementations both use synchronous Redis accounting.
+All limiter modes use the same Redis timeout, defaulting to 1,000 ms and
+configurable with `--redis-timeout-ms`. This tolerates scheduling pauses on the
+shared CPU-capped runner; zero local-fallback and expected-status checks remain
+strict. The timeout is included in each report.
 Our limit uses `[client_id]`, `window_ms=86400000`, and the selected algorithm.
 The daily window avoids short reset boundaries during samples. Trials refuse
 to start too close to the UTC day boundary.

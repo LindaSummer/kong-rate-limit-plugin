@@ -83,6 +83,7 @@ def markdown(report):
              f"{report['repeats']} repeats. Keepalive: `{report['keepalive']}`. "
              "Gateway traffic uses IPv4 DNS round robin; the direct control bypasses Kong. Runs are serial and implementation order rotates per repeat.",
              f"Kong async sync_rate: {report['kong_async_sync_rate']} seconds. Our implementations use synchronous Redis accounting.", "",
+             f"Redis timeout for every limiter: {report['redis_timeout_ms']} ms.", "",
              "### CPU and memory settings", "",
              "CPU values are per-container quotas, not dedicated cores; zero means no explicit cap. All containers share the host.", "",
              "| Service | CPU quota | Memory limit | CPU pinning |",
@@ -144,12 +145,15 @@ def main():
     parser.add_argument("--keepalive", action=argparse.BooleanOptionalAction, default=True,
                         help="Reuse HTTP connections (default); disable for connection-churn experiments")
     parser.add_argument("--kong-async-sync-rate", type=float, default=0.1, help="Async Redis sync interval in seconds")
+    parser.add_argument("--redis-timeout-ms", type=int, default=1000, help="Same Redis timeout for all limiter modes")
     parser.add_argument("--output", type=Path, default=Path("/tmp/kong-rate-limit-comparison"))
     args = parser.parse_args()
     if min(args.vus, args.duration, args.warmup, args.repeats) < 1:
         parser.error("vus, duration, warmup and repeats must be positive")
     if not 0.02 <= args.kong_async_sync_rate <= 5:
         parser.error("kong-async-sync-rate must be between 0.02 and 5 seconds")
+    if not 1 <= args.redis_timeout_ms <= 60000:
+        parser.error("redis-timeout-ms must be between 1 and 60000")
     if args.duration + args.warmup > 120:
         parser.error("Each trial must be at most 120 seconds to keep the admitted budget practical")
     output = args.output.resolve()
@@ -164,6 +168,7 @@ def main():
               "vus": args.vus, "duration_seconds": args.duration, "warmup_seconds": args.warmup,
               "repeats": args.repeats, "keepalive": args.keepalive,
               "kong_async_sync_rate": args.kong_async_sync_rate,
+              "redis_timeout_ms": args.redis_timeout_ms,
               "environment": {"cpus": info["NCPU"], "memory_bytes": info["MemTotal"],
                               "architecture": info["Architecture"], "kernel": platform.release(),
                               "docker_version": info["ServerVersion"]}, "resources": resources(), "images": {}, "runs": []}
@@ -184,7 +189,8 @@ def main():
                 label = f"{repeat + 1}-{workload}-{implementation}"
                 print(f"Starting {label}", flush=True)
                 fixture = json.loads(configure("prepare", "--implementation", implementation, "--workload", workload,
-                                               "--sync-rate", str(args.kong_async_sync_rate)))
+                                               "--sync-rate", str(args.kong_async_sync_rate),
+                                               "--redis-timeout-ms", str(args.redis_timeout_ms)))
                 try:
                     run_k6(fixture, implementation, workload, args.vus, args.warmup, args.keepalive, output / (label + "-warmup.json"), peers)
                     result = run_k6(fixture, implementation, workload, args.vus, args.duration, args.keepalive, output / (label + ".json"), peers)
