@@ -1,5 +1,139 @@
 # Kong fixed and sliding-window rate limiter
 
+## Overview
+
+This project implements a custom rate-limiting plugin for Kong, supporting both fixed and sliding-window algorithms with Redis as the backend for distributed consistency. It aims to provide accurate rate limiting while maintaining high performance and availability in a gateway environment.
+
+## Design for the distributed rate limiting
+
+### Requirements
+- the main stream rate limit algorithm
+- support multiple dimension matching rules
+- Leverage Redis as the backend for distributing consistency
+- Configurable by time window and threshold
+- Multiple instances should have have strong consistency through Redis
+
+
+### Design Considerations
+
+#### Environment for MVP
+
+Since it is a MVP and POC, we should leverage current infra as mush as we could to focus the core logic of rate limit.
+So use curreent Kong with a customer plugin should be a good choice for the MVP.
+
+### Architecture for MVP
+
+#### Architecture Overview
+
+The MVP extends Kong with a custom rate-limiting plugin. Kong owns routing and
+configuration; the plugin owns window algorithms and counter backends.
+
+```mermaid
+flowchart TB
+    subgraph Gateway["Kong gateway — each node"]
+        Routing["Routes and services<br/>Matching and grouping"]
+        Config["Scoped plugin configuration<br/>Limits, windows, dimensions"]
+
+        subgraph Plugin["Rate-limiting plugin"]
+            Windows["Fixed-window / approximate sliding-window limiters"]
+            Counters["Counter backends"]
+            Local["Local fallback<br/>Node-local shared memory"]
+            Windows --> Counters
+            Counters -.-> Local
+        end
+
+        Proxy["Kong HTTP proxy<br/>Transparent upstream Retry-After passthrough"]
+        Routing --> Config --> Windows
+        Windows --> Proxy
+    end
+
+    Redis[("Redis<br/>Shared budgets across gateway nodes")]
+    Upstream["Upstream services"]
+    Counters --> Redis
+    Proxy --> Upstream
+```
+
+Routes and services define which traffic a plugin configuration covers. Multiple
+limits belong to that configuration, and dimensions such as ClientId or path
+define counter identity within its scope.
+
+Fixed and approximate sliding windows share the counter-backend abstraction.
+Redis provides shared budgets across gateway nodes with atomic per-bucket
+operations; there is no transaction across all limits. The local fallback uses
+independent budgets per node, with circuit-breaker recovery to Redis.
+
+Kong proxies admitted traffic to upstream services and preserves their
+`Retry-After` headers. When the plugin rejects a request itself, it returns a
+`429` response with its own `Retry-After` value.
+
+### Tradeoffs
+
+1. Supporting the http protocol with different requirements (maybe we have more in future) is complex and not the most valuable for the MVP.
+So we should leverate exsiting Kong mature capabilities for handling HTTP protocol requirements instead of implementing them ourselves.
+
+2. Current Kong's rate limiting plugin only supports fixed window, and make a sliding window implementation should be a good enhancement for more accurate rate limiting. And this existing plugin prodvides a good baseline of performance.
+
+3. For the consistency, the more strict consistency will lead to higher latency and potential performance trade-offs, while weaker consistency may improve performance but at the cost of potential rate limit violations in distributed scenarios.
+
+In our scenario, as a middleware in gateway, the performance and avalibility are most critical and mandatory. So we could make a weaker consistency
+for better performance once the redis MVP is validated.
+
+4. Integration tests and baseline performance test with kong's existing rate limiting plugin should be conducted to ensure the custom plugin meets the required performance and correctness standards.
+
+### Detail design for each component
+
+#### Matching Rule and Dynamic Configuration
+
+The matching rule could be covered by kong `route` or `service` definitions. So this requirement and the dynamic configuration could be handled by Kong itself, while the rate limiting logic would be implemented in the custom plugin.
+
+#### Rate Limiting Algorithm Choice
+
+After reading the exsiting plugin in [kong](https://github.com/Kong/kong/blob/21032122ab80c973f368f6bc539f53985e7164e8/kong/plugins/rate-limiting/policies/init.lua#L366-L439) and [treafik](https://github.com/traefik/traefik/blob/master/pkg/middlewares/ratelimiter/redis_limiter.go), kong uses fixed window and treafil uses buckets.
+
+In [kong advanced rate limiting](https://developer.konghq.com/plugins/rate-limiting-advanced/), it suports both fixed and sliding window algorithms.
+
+So for the MVP, we will implement a fixed window rate limiting algorithm.
+Then we will implement slide window and token bucket algorithms for more accurate rate limiting.
+It should be configured through the custom plugin, allowing users to specify the time window and threshold for rate limiting.
+
+#### Distributed Consistency with Redis
+
+Both traefik and kong rate limiting plugin use lua script to to rate limit computing inside the Redis server.
+This ensures strong consistency and we could also use this way in MVP first step.
+Kong plugin has async update machanism which makes performance better but may have a slightly weaker consistency.
+For a gateway, performance of traffic is the core concern, so this could be adapt to our first version of plugin.
+
+The cost of redis network and redis lua engine may impact the performance when there is high traffic.
+So in plan we should optimize it with sharding or sub-windows with local cache to improve performance.
+
+#### Fallback when redis failed
+
+When redis is lost, we **must** have a fallback way to let the traffic works, we will switch back to local in-memory rate limiting.
+This may made the rate limiting less accurate and could potentially allow some traffic to exceed the intended limits.
+But it is mandatory to have this fallback to ensure that traffic continues to flow even when Redis is unavailable.
+
+During fallback, use half-open strategy to gradually allow traffic back to Redis once it becomes available again. This helps to prevent a sudden surge of traffic that could overwhelm the Redis server and ensures a smoother transition back to the primary rate limiting mechanism.
+
+### Implementation Plan
+
+#### MVP Implementation
+
+1. Follow current kong rate limiting plugin and write a redis fixed and sliding window, supporting sync mode.
+2. Implement local in-memory fallback for when Redis is unavailable with the half-open strategy to gradually allow traffic back to Redis once it becomes available again.
+3. Write tests to ensure the correctness and performance of the rate limiting plugin under various scenarios, including high traffic, Redis failures, and fallback situations.
+4. Add integration tests and benchmark tests with kong's existing rate limiting plugin to compare performance and correctness.
+
+
+#### Future plan need for a really production ready one
+
+1. Support async mode to use weaker consistency for better performance. It depends on the performance report we get in kong's sync and async modes.
+2. If the async optimization couldn't achieve the desired performance improvement, optimize the performance of the rate limiting plugin, potentially through techniques such as sharding, sub-windows, and local caching to reduce the impact of Redis network and Lua engine overhead under high traffic conditions.
+We have a example could learn from, [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
+3. Add metrics and monitoring to track the performance and effectiveness of the rate limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. It will be great to integrate with opentelemetry for centralized observability.
+
+
+## How to use and test this plugin
+
 A standalone custom Kong plugin with fixed and approximate sliding windows,
 shared Redis counters, and node-local rate limiting during Redis failures.
 Three official `kong:3.9.4` containers (two workers each) use PostgreSQL for Kong
