@@ -3,6 +3,22 @@ name: Rate limiter benchmarks
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'kong/**/*.lua'
+      - 'test/**/*.lua'
+      - 'test/**/*.py'
+      - 'test/**/*.js'
+      - 'test/upstream-go/*.go'
+      - 'test/upstream-go/go.mod'
+      - 'test/upstream-go/go.sum'
+      - 'test/**/Dockerfile'
+      - 'test/pyproject.toml'
+      - 'test/uv.lock'
+      - 'compose*.yaml'
+      - 'run.sh'
+      - 'Dockerfile'
+      - '.dockerignore'
+      - '.github/workflows/benchmark.yml'
   workflow_dispatch:
 
 permissions:

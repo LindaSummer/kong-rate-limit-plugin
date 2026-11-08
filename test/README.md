@@ -291,8 +291,11 @@ modes within the same recorded run.
 ### Automatic PR benchmark and resource settings
 
 [The benchmark workflow](../.github/workflows/benchmark.yml) runs automatically on
-PR creation, new commits, reopening, and readiness for review, and supports manual
-dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
+PR creation, new commits, reopening, and readiness for review when the PR changes
+plugin or test code, dependency manifests, container/build configuration, or the
+benchmark workflow itself. Documentation-only PRs skip the benchmark. Manual
+dispatch remains available regardless of changed paths.
+It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
 three repeats, keepalive enabled, and a 0.1-second Kong async interval. It runs independently of the
 correctness suite on an isolated Compose project.
 
