@@ -30,34 +30,32 @@ The MVP extends Kong with a custom rate-limiting plugin. Kong owns routing and
 configuration; the plugin owns window algorithms and counter backends.
 
 ```mermaid
-graph TB
-    subgraph Gateway["Kong gateway — each node"]
-        direction TB
-        subgraph Routing["Routing and configuration layer"]
-            Routes["Routes and services<br/>Request matching and route grouping"]
-            Config["Scoped plugin configuration<br/>Limits, windows, and counter dimensions"]
-            Routes --- Config
+block-beta
+    columns 2
+
+    block:Gateway:2
+        columns 2
+        Kong["Kong gateway — each node"]:2
+        Routing["Routes and services — matching and grouping"]:2
+        Config["Scoped plugin configuration — limits, windows, dimensions"]:2
+
+        block:Plugin:2
+            columns 2
+            PluginTitle["Rate-limiting plugin"]:2
+            Fixed["Fixed-window limiter"] Sliding["Approximate sliding-window limiter"]
+            Backends["Counter backends — Redis primary, local fallback"]:2
+            RedisAdapter["Redis counter backend"] Local["Local fallback — node-local shared memory"]
         end
 
-        subgraph Plugin["Rate-limiting plugin layer"]
-            direction TB
-            subgraph Algorithms["Window algorithms"]
-                Fixed["Fixed-window limiter"]
-                Sliding["Approximate sliding-window limiter"]
-            end
-            subgraph Backends["Counter backends"]
-                RedisAdapter["Redis adapter<br/>Pipelined atomic bucket operations"]
-                Local["Local fallback<br/>Node-local shared memory"]
-            end
-            Algorithms ---|"use"| Backends
-        end
-
-        Routing ---|"configures"| Plugin
+        Proxy["Kong HTTP proxy — transparent upstream Retry-After passthrough"]:2
     end
 
-    RedisAdapter ---|"shared budgets across gateway nodes"| Redis[("Redis<br/>Window counters and field expiry")]
-    Local -.-|"selected during Redis failures"| RedisAdapter
-    Gateway ---|"HTTP proxy; transparent upstream Retry-After passthrough"| Upstream["Upstream services"]
+    space:2
+    Redis[("Redis — shared budgets across gateway nodes")]
+    Upstream["Upstream services"]
+
+    RedisAdapter --> Redis
+    Proxy --> Upstream
 ```
 
 Routes and services define which traffic a plugin configuration covers. Multiple
