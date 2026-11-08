@@ -1,5 +1,10 @@
 # Test cases and benchmarks
 
+Compose publishes no host ports. Tests and benchmarks use service DNS names on
+the internal network. Use `docker compose exec redis redis-cli` for Redis access
+and the tests container for proxy/Admin API requests, as shown in the
+[root README](../README.md#start-and-test).
+
 This directory contains the Python integration echo, Go benchmark upstream,
 policy setup, automated correctness tests, and k6 benchmark for `rate-limiting-sliding-window`. Run all commands below
 from the repository root with Docker Engine and Compose v2 available.
@@ -24,6 +29,13 @@ attempts per fixed second and 30 per approximate sliding minute per ClientId.
 default policy. The suite temporarily pauses Redis, flushes its Lua script cache,
 and creates temporary Kong entities. Do not run tests or benchmarks concurrently
 against the same Compose project. `stop` retains PostgreSQL and Redis volumes.
+
+For a separate test environment, set a unique `COMPOSE_PROJECT_NAME` for all
+start/test/stop and inspection commands. This isolates containers, networks, and
+data volumes without host-port overrides. See the
+[isolated environment example](../README.md#run-a-separate-environment).
+Different projects can coexist, but benchmark measurements still share host CPU
+and memory; keep competing workloads idle when collecting performance results.
 
 The current suite passed on 2026-11-07: Lua syntax and unit checks, shared-memory
 and Redis checks, pytest gateway scenarios, and restart verification. Fixed/sliding algorithms and upstream 429/503
@@ -291,8 +303,11 @@ modes within the same recorded run.
 ### Automatic PR benchmark and resource settings
 
 [The benchmark workflow](../.github/workflows/benchmark.yml) runs automatically on
-PR creation, new commits, reopening, and readiness for review, and supports manual
-dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
+PR creation, new commits, reopening, and readiness for review when the PR changes
+plugin or test code, dependency manifests, container/build configuration, or the
+benchmark workflow itself. Documentation-only PRs skip the benchmark. Manual
+dispatch remains available regardless of changed paths.
+It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
 three repeats, keepalive enabled, and a 0.1-second Kong async interval. It runs independently of the
 correctness suite on an isolated Compose project.
 
@@ -315,9 +330,21 @@ The workflow sets `COMPOSE_FILE=compose.yaml:compose.benchmark.yaml`. The
 These are quotas, not dedicated cores; CPUs are not pinned. The report captures
 the actual runner CPU count and RAM instead of assuming a hosted-runner size.
 Local runs without the overlay remain uncapped and explicitly report that.
-To reproduce CI caps locally, use an isolated project or stop other runs before
-setting the same `COMPOSE_FILE` environment variable. Do not apply the overlay
-to an active demo as an incidental test step.
+To reproduce CI caps locally in a separate environment:
+
+```sh
+(
+  export COMPOSE_PROJECT_NAME=kong-isolated-benchmark
+  export COMPOSE_FILE=compose.yaml:compose.benchmark.yaml
+  ./run.sh benchmark-compare --vus 10 --duration 10 --warmup 2 --repeats 3 --keepalive \
+    --kong-async-sync-rate 0.1 --redis-timeout-ms 1000 --output /tmp/kong-isolated-benchmark
+  ./run.sh stop
+)
+```
+
+Both source Compose files publish no host ports. The project name isolates their
+networks and data volumes, while the overlay changes only resource limits. Use
+the same project and file settings for any inspection commands during the run.
 
 The workflow uploads Markdown, raw JSON, and logs as `rate-limit-benchmark`
 artifacts for seven days and adds the report to the job summary. A separate job

@@ -28,6 +28,9 @@ function _M.calculate(current, previous, rule, now)
   local _, elapsed = _M.window(rule, now)
   local w, limit = rule.window_ms, rule.limit
   if rule.algorithm == "fixed_window" then previous = 0 end
+  -- Weighted usage = current + previous * (1 - elapsed / w).
+  -- Multiply the remaining budget by w to avoid division in the admission check:
+  -- available = (limit - weighted usage) * w; >= 0 means this attempt fits.
   -- Near an admission boundary these integer products are within 2^53.
   -- Very large attempt counts unambiguously deny and never become negative.
   local available = (limit-current)*w-previous*(w-elapsed)

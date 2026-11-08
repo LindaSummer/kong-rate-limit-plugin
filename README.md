@@ -1,19 +1,210 @@
 # Kong fixed and sliding-window rate limiter
 
+## Overview
+
+This project implements a custom Kong rate-limiting plugin with fixed and approximate sliding windows. It supports configurable windows, thresholds, and dimensions such as Path, Client ID, and IP.
+
+Redis provides shared counters across gateway nodes using atomic per-bucket operations. Operations across multiple limits are independent. Consistent enforcement assumes synchronized gateway clocks and converged plugin configurations.
+
+During Redis failures, this MVP deliberately prioritizes availability by switching to independent node-local budgets. Local consumption is not reconciled with Redis, so a strict global quota is not guaranteed during outages or recovery.
+
+## Design for the distributed rate limiting
+
+### Requirements
+
+- Implement a mainstream rate-limiting algorithm.
+- Support Path, Client ID, and IP dimensions, including combinations.
+- Use Redis to coordinate a shared quota pool across at least three Kong nodes.
+- Return HTTP 429 with `Retry-After` when a limit is exceeded.
+- Support dynamic configuration of dimensions, windows, and thresholds.
+
+The assignment targets consistent enforcement of the shared quota. This MVP uses atomic per-bucket Redis operations during normal operation, with the deliberate local-fallback exception described above.
+
+### Design Considerations
+
+#### Environment for MVP
+
+Since it is a MVP and POC, we should leverage current infra as mush as we could to focus the core logic of rate limit.
+So use curreent Kong with a customer plugin should be a good choice for the MVP.
+
+### Architecture for MVP
+
+#### Architecture Overview
+
+The MVP extends Kong with a custom rate-limiting plugin. Kong owns routing and
+configuration; the plugin owns window algorithms and counter backends.
+
+```mermaid
+flowchart TB
+    subgraph Gateway["Kong gateway — each node"]
+        Routing["Routes and services<br/>Matching and grouping"]
+        Config["Scoped plugin configuration<br/>Limits, windows, dimensions"]
+
+        subgraph Plugin["Rate-limiting plugin"]
+            Windows["Fixed-window / approximate sliding-window limiters"]
+            Counters["Counter backends"]
+            Local["Local fallback<br/>Node-local shared memory"]
+            Windows --> Counters
+            Counters -.-> Local
+        end
+
+        Proxy["Kong HTTP proxy<br/>Transparent upstream Retry-After passthrough"]
+        Routing --> Config --> Windows
+        Windows --> Proxy
+    end
+
+    Redis[("Redis<br/>Shared budgets across gateway nodes")]
+    Upstream["Upstream services"]
+    Counters --> Redis
+    Proxy --> Upstream
+```
+
+Routes and services define which traffic a plugin configuration covers. Multiple
+limits belong to that configuration, and dimensions such as ClientId or path
+define counter identity within its scope.
+
+Fixed and approximate sliding windows share the counter-backend abstraction.
+Redis provides shared budgets across gateway nodes with atomic per-bucket
+operations; there is no transaction across all limits. The local fallback uses
+independent budgets per node, with circuit-breaker recovery to Redis.
+
+Kong proxies admitted traffic to upstream services and preserves their
+`Retry-After` headers. When the plugin rejects a request itself, it returns a
+`429` response with its own `Retry-After` value.
+
+### Tradeoffs
+
+1. Supporting the http protocol with different requirements (maybe we have more in future) is complex and not the most valuable for the MVP.
+So we should leverate exsiting Kong mature capabilities for handling HTTP protocol requirements instead of implementing them ourselves.
+
+2. Current Kong's rate limiting plugin only supports fixed window, and make a sliding window implementation should be a good enhancement for more accurate rate limiting. And this existing plugin prodvides a good baseline of performance.
+
+3. For the consistency, the more strict consistency will lead to higher latency and potential performance trade-offs, while weaker consistency may improve performance but at the cost of potential rate limit violations in distributed scenarios.
+
+In our scenario, as a middleware in gateway, the performance and avalibility are most critical and mandatory. So we could make a weaker consistency
+for better performance once the redis MVP is validated.
+
+4. Integration tests and baseline performance test with kong's existing rate limiting plugin should be conducted to ensure the custom plugin meets the required performance and correctness standards.
+
+### Detail design for each component
+
+#### Matching Rule and Dynamic Configuration
+
+The matching rule could be covered by kong `route` or `service` definitions. So this requirement and the dynamic configuration could be handled by Kong itself, while the rate limiting logic would be implemented in the custom plugin.
+
+#### Rate Limiting Algorithm Choice
+
+After reading the exsiting plugin in [kong](https://github.com/Kong/kong/blob/21032122ab80c973f368f6bc539f53985e7164e8/kong/plugins/rate-limiting/policies/init.lua#L366-L439) and [treafik](https://github.com/traefik/traefik/blob/master/pkg/middlewares/ratelimiter/redis_limiter.go), kong uses fixed window and treafil uses buckets.
+
+In [kong advanced rate limiting](https://developer.konghq.com/plugins/rate-limiting-advanced/), it suports both fixed and sliding window algorithms.
+
+The MVP implements both fixed and approximate sliding windows. Fixed windows provide a direct baseline against Kong's bundled limiter. Sliding windows estimate usage from the current and previous windows to reduce boundary effects; they do not enforce an exact rolling-window quota.
+
+Each limit is configured through the custom plugin, including its algorithm, window duration, threshold, and counter dimensions.
+
+#### Distributed Consistency with Redis
+
+The design draws on Kong's Redis policy and Traefik's Redis limiter: Redis-side atomic operations allow multiple gateway nodes to coordinate shared counters. Kong's synchronous and asynchronous modes also provide a reference for evaluating the tradeoff between consistency and throughput.
+
+This MVP starts with synchronous accounting to establish a correctness and performance baseline. It pipelines operations across configured limits, with a small atomic Lua operation per bucket. Window calculations and admission decisions run in Kong. There is no transaction across limits, and denied attempts still consume counters.
+
+Window boundaries use gateway timestamps, so synchronized clocks are required. Clock skew can make nodes select different windows near boundaries. Configuration updates also propagate eventually.
+
+Redis round trips and script execution introduce overhead. Kong's async baseline helps evaluate whether asynchronous accounting is a worthwhile next step, while profiling can identify opportunities in our implementation.
+
+#### Fallback when Redis fails
+
+When Redis accounting fails, the plugin switches to node-local enforcement. This is an intentional availability choice: workers on one node share a local budget, but different nodes enforce independent budgets.
+
+A circuit breaker limits recovery probes and gradually restores Redis traffic. Local consumption is not merged into Redis, so the configured global quota can be exceeded during outages and recovery.
+
+Redis errors alone do not make requests unavailable. Local enforcement can still reject requests with HTTP 429; the plugin returns HTTP 503 if local enforcement also fails.
+
+### Implementation Plan
+
+#### MVP Implementation
+
+1. Implemented fixed and approximate sliding windows with synchronous Redis accounting.
+2. Implemented node-local fallback with circuit-breaker probes and gradual recovery.
+3. Added correctness tests covering algorithms, shared budgets, dynamic configuration, Redis failures, and gateway restarts.
+4. Added benchmarks against Kong's bundled synchronous and asynchronous Redis limiter, plus direct-upstream and plugin-free controls.
+
+
+#### Future plan need for a really production ready one
+
+1. Profile the synchronous request path, including circuit-breaker lock contention and JSON state reads/writes. Investigate reducing unchanged-state writes while preserving failure fencing and the single-probe guarantee. These are optimization candidates; the current benchmarks do not isolate their individual costs.
+2. Support async mode to use weaker consistency for better performance. It depends on the performance report we get in kong's sync and async modes.
+3. If the async optimization couldn't achieve the desired performance improvement, optimize the performance of the rate limiting plugin, potentially through techniques such as sharding, sub-windows, and local caching to reduce the impact of Redis network and Lua engine overhead under high traffic conditions.
+We have a example could learn from, [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
+4. Add metrics and monitoring to track the performance and effectiveness of the rate limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. It will be great to integrate with opentelemetry for centralized observability.
+
+##### The benchmark of current plugin and kong's
+
+Here are benchmark in [my local host](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6708567152) and in [github action](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/2#issuecomment-6709115520)
+
+From the benchamrk report, I find that the performance in async mode is generally better than in sync mode, especially under high traffic conditions. However, the exact improvement depends on the specific workload and configuration.
+
+Here is the environment and setup for the benchmark:
+- Kong 3.9.4, Redis 7.4, k6 1.3.0; three Kong nodes with two workers each.
+- Docker host: 32 logical CPUs, 123.4 GiB RAM, x86_64.
+
+In first version, I leverage the integration python test case into benchmark, but the sync and async don't have much difference in performance under the tested scenarios.
+
+| Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| admitted | Direct echo backend | 14,384 (14,359–14,401) | 1.56× | 2.844 | 3.909 | 431,487 / 0 |
+| admitted | Kong without plugins | 9,830 (9,788–9,833) | 1.06× | 4.159 | 5.670 | 294,551 / 0 |
+| admitted | Kong sync | 9,240 (9,157–9,277) | 1.00× | 4.288 | 5.778 | 276,778 / 0 |
+| admitted | Kong async | 9,641 (9,600–9,702) | 1.04× | 4.240 | 5.795 | 289,480 / 0 |
+| admitted | Custom fixed_window | 9,253 (9,205–9,316) | 1.00× | 4.290 | 5.834 | 277,781 / 0 |
+| admitted | Custom sliding_window | 9,258 (9,219–9,282) | 1.00× | 4.308 | 5.816 | 277,640 / 0 |
+| throttled | Kong sync | 64,850 (64,585–64,940) | 1.00× | 0.512 | 1.035 | 0 / 1,943,962 |
+| throttled | Kong async | 85,918 (85,762–86,517) | 1.32× | 0.343 | 0.676 | 0 / 2,582,635 |
+| throttled | Custom fixed_window | 38,700 (38,298–39,194) | 0.60× | 1.458 | 2.946 | 0 / 1,162,166 |
+| throttled | Custom sliding_window | 39,312 (38,487–39,406) | 0.61× | 1.419 | 2.949 | 0 / 1,172,392 |
+
+Then I changed to a go http server and the performance improved significantly.
+The faster upstream makes the performance difference between synchronous and asynchronous accounting more visible.
+
+| Workload | Plugin | Median req/s (min–max) | vs Kong sync | Median p95 ms | Median p99 ms | Measured 200 / 429 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| admitted | Direct Go backend | 95,889 (94,606–97,007) | 3.08× | 0.185 | 0.524 | 2,876,855 / 0 |
+| admitted | Kong without plugins | 62,717 (62,448–62,740) | 2.02× | 0.378 | 0.831 | 1,879,126 / 0 |
+| admitted | Kong sync | 31,095 (31,074–31,809) | 1.00× | 1.225 | 2.214 | 939,919 / 0 |
+| admitted | Kong async | 56,393 (56,375–56,565) | 1.81× | 0.539 | 1.107 | 1,693,445 / 0 |
+| admitted | Custom fixed_window | 32,324 (32,106–33,599) | 1.04× | 1.579 | 3.105 | 980,445 / 0 |
+| admitted | Custom sliding_window | 32,987 (32,074–33,244) | 1.06× | 1.572 | 3.055 | 983,282 / 0 |
+| throttled | Kong sync | 64,696 (64,335–65,106) | 1.00× | 0.516 | 1.042 | 0 / 1,941,525 |
+| throttled | Kong async | 85,383 (85,151–85,761) | 1.32× | 0.346 | 0.676 | 0 / 2,563,319 |
+| throttled | Custom fixed_window | 37,330 (37,062–38,026) | 0.58× | 1.526 | 3.029 | 0 / 1,124,631 |
+| throttled | Custom sliding_window | 38,421 (37,856–38,526) | 0.59× | 1.483 | 2.983 | 0 / 1,148,274 |
+
+This makes the asynchronous optimization work and significantly improves the request throughput compared to the synchronous approach, especially when the Redis IO becomes the major bottleneck.
+
+So async accounting is the next performance optimization to evaluate, with explicit bounds on overshoot and counter loss.
+
+
+## How to use and test this plugin
+
+__This part is primarily assistanted by Codex.__
+
 A standalone custom Kong plugin with fixed and approximate sliding windows,
 shared Redis counters, and node-local rate limiting during Redis failures.
 Three official `kong:3.9.4` containers (two workers each) use PostgreSQL for Kong
 configuration and Redis 7.4 for counters. No upstream Kong checkout or custom
 PostgreSQL tables are required.
 
-## Start and test
+### Start and test
 
 Prerequisites: Docker Engine and Docker Compose v2. Run from this repository:
 
 ```sh
 ./run.sh start
-curl -i -H 'X-Client-Id: alice' http://localhost:8100/window/a
-curl -i -H 'X-Client-Id: alice' http://localhost:8200/window/b
+docker compose run --rm --no-deps -T tests uv run --frozen --no-sync python - <<'PYTHON'
+from common import http
+for url in ("http://kong1:8000/window/a", "http://kong2:8000/window/b"):
+    print(http(url, headers={"X-Client-Id": "alice"}))
+PYTHON
 ./run.sh test
 ./run.sh stop
 ```
@@ -39,12 +230,27 @@ uses Ubuntu 24.04 and an isolated Compose project per run. Test output and
 container diagnostics are uploaded as the `integration-logs` artifact for seven
 days, including failed runs. No repository secrets or source Kong build are needed.
 
-| Service | Address |
+All services are internal to the Compose network; no host ports are published.
+Use the tests container for proxy/Admin API requests and `docker compose exec`
+for Redis inspection. Separate Compose projects can run without host-port conflicts.
+
+| Service | Internal address |
 | --- | --- |
-| Kong proxies | `http://localhost:8100`, `:8200`, `:8300` |
-| Kong Admin APIs | `http://localhost:8101`, `:8201`, `:8301` (localhost only) |
-| Redis | `127.0.0.1:6380` (internal address `redis:6379`) |
+| Kong proxies | `http://kong1:8000`, `http://kong2:8000`, `http://kong3:8000` |
+| Kong Admin APIs | `http://kong1:8001`, `http://kong2:8001`, `http://kong3:8001` |
+| Redis | `redis:6379` |
 | PostgreSQL / Python echo / Go benchmark upstream | Internal Compose network only |
+
+These DNS names resolve inside the Compose network. For example, list Kong
+services through the internal Admin API after `./run.sh start`:
+
+```sh
+docker compose run --rm --no-deps -T tests uv run --frozen --no-sync python - <<'PYTHON'
+from common import admin
+for service in admin("/services")["data"]:
+    print(service["id"], service.get("name"))
+PYTHON
+```
 
 ```text
 kong/plugins/rate-limiting-sliding-window/  Plugin and implementation notes
@@ -74,7 +280,32 @@ historical project name `kong-shared-rate-limiting` is retained to reuse existin
 PostgreSQL and Redis volumes. `./run.sh stop` preserves those volumes; use
 `docker compose down -v` only to intentionally discard their data.
 
-## Fixed and sliding-window plugin
+### Run a separate environment
+
+Set a unique Compose project name to create separate containers, networks, and
+PostgreSQL/Redis volumes. No host-port overrides are required:
+
+```sh
+(
+  export COMPOSE_PROJECT_NAME=kong-isolated-test
+  ./run.sh start
+  ./run.sh test
+  ./run.sh stop
+)
+```
+
+Use the same project name for every command that accesses that environment,
+including `docker compose exec redis redis-cli`. The subshell above keeps the
+setting local to that example. Stopping it preserves its own volumes; the
+default demo's containers and data belong to a different project.
+
+Use the source Compose files with the project name set before configuration is
+resolved. Exported `docker compose config` output contains explicit resource
+names; changing only its project name does not rename those networks or volumes.
+For an isolated run with CI resource caps, see
+[the benchmark environment instructions](test/README.md#automatic-pr-benchmark-and-resource-settings).
+
+### Fixed and sliding-window plugin
 
 `rate-limiting-sliding-window` uses Kong for route matching and policy selection.
 Attach it to a Gateway Service to share budgets across that service's routes.
@@ -85,9 +316,9 @@ The default service-scoped demo can also be reapplied explicitly:
 
 ```sh
 docker compose run --build --rm --no-deps tests uv run --frozen --no-sync python window_configure.py
-curl -i -H 'X-Client-Id: alice' http://localhost:8100/window/a
-curl -i -H 'X-Client-Id: alice' http://localhost:8200/window/b
 ```
+
+Send requests from the tests container as shown in [Start and test](#start-and-test).
 
 Both paths share five admissions per fixed second and an approximate sliding
 limit of 30 per minute for each client. General service-scoped configuration:
@@ -207,19 +438,16 @@ The plugin requires a `sliding_ratelimit` shared dictionary (Compose allocates
 16 MB) and Kong's lock dictionary. Lua modules are mounted read-only: restart all
 three gateways after edits. No custom DAO, migration, metrics exporter, or
 PostgreSQL counter backend is included. Async syncing, exact timestamp logs,
-Redis Cluster, and optimization work are deferred. See
-[kong/plugins/rate-limiting-sliding-window/IMPLEMENTATION.md](kong/plugins/rate-limiting-sliding-window/IMPLEMENTATION.md)
-for implementation decisions.
+Redis Cluster, and optimization work are deferred.
 
-## Query Redis from the host
+### Query Redis
 
-Redis is published on `127.0.0.1:6380`; port 6379 was already occupied on the
-host. Kong still connects to `redis:6379` inside Compose. The existing dedicated
-Redis volume is retained when applying this mapping.
+Run Redis CLI inside its container; no host installation or port mapping is needed.
+Kong and tests connect to `redis:6379` on the Compose network.
 
 ```sh
-redis-cli -h 127.0.0.1 -p 6380 PING
-redis-cli -h 127.0.0.1 -p 6380
+docker compose exec redis redis-cli PING
+docker compose exec redis redis-cli
 ```
 
 Inside redis-cli, use `INFO keyspace` and
@@ -228,12 +456,7 @@ Use `HGETALL "<escaped-key>"` to inspect its timestamp fields and counts and
 `HPTTL "<escaped-key>" FIELDS 1 <window-start>` to inspect a field's remaining TTL.
 Keys contain binary UUIDs/digests; the interactive client displays escaped bytes.
 
-To use another host port, set `REDIS_HOST_PORT` when starting Compose, for example
-`REDIS_HOST_PORT=6381 ./run.sh start`. The binding is localhost-only; from another
-machine, forward it with SSH, for example
-`ssh -L 6380:127.0.0.1:6380 user@docker-host`, then connect to local port 6380.
-
-## Compose benchmark with DNS round robin
+### Compose benchmark with DNS round robin
 
 All three gateways share the Compose network alias `gateway`. From another
 container, `gateway:8000` resolves to the three gateway IPs. The `benchmark`
