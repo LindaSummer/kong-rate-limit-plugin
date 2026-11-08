@@ -45,6 +45,6 @@ case "${1:-start}" in
     shift
     compose run --rm --no-deps benchmark run "$@" /test/benchmark.js
     ;;
-  stop) compose down ;;
+  stop) compose --profile '*' down ;;
   *) echo "Usage: $0 [start|test|stop|benchmark [k6 run options]|benchmark-compare [options]]" >&2; exit 2 ;;
 esac
