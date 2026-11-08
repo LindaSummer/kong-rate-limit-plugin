@@ -210,7 +210,7 @@ a configurable interval (default 0.1 seconds). Both fail closed on Redis errors.
 Our implementations use synchronous Redis accounting. Async caches settle before
 timing throttled traffic; this is not a comparison of overshoot guarantees. Both configurations have the
 same peer-IP gateway attribution. No observer plugin is attached. Additional
-admitted-only controls target the echo backend directly and Kong with no plugins,
+admitted-only controls target the Go backend directly and Kong with no plugins,
 separating backend, gateway, and limiter costs.
 
 The host orchestrator `test/compare_benchmarks.py` runs serial trials with a warmup
@@ -219,7 +219,7 @@ JSON, policy configuration, source revision, image IDs, and host resource metada
 then generates a Markdown report with median throughput, ranges, and per-trial
 latency percentiles. Fixed windows provide the closest comparison; sliding
 windows have different semantics. These end-to-end results include shared-host
-contention and the echo backend for admitted traffic. Benchmarks have a separate automatic PR workflow from correctness CI.
+contention and the Go backend for admitted traffic. Benchmarks have a separate automatic PR workflow from correctness CI.
 
 Measured results are not committed. PR conversations contain the current reports;
 Actions artifacts retain Markdown, raw JSON, and logs for seven days. The automatic
@@ -229,3 +229,12 @@ container's quotas and CPU pinning. Local runs without the overlay are explicitl
 reported as uncapped. A separate reporting job updates the same-repository PR
 comment without checking out or executing PR source. Fork runs retain artifacts
 without comment publishing because their token is read-only.
+
+Benchmark traffic uses the dedicated `benchmark-upstream` Go service, built with
+Go 1.27.2 into a non-root scratch image. It returns constant 512-byte JSON over
+HTTP/1.1 without request logging. Integration tests and normal demos retain the
+Python echo backend and its upstream-error simulations. Both benchmark commands
+start the Go service; the standalone command configures separate `/benchmark/*`
+demo routes. Reports identify the upstream image and resource limits. Concurrent
+readiness probes exercise all gateway workers before sampling, avoiding stale
+route/plugin caches on otherwise idle workers.

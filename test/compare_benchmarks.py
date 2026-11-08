@@ -29,7 +29,7 @@ def run_k6(fixture, implementation, workload, vus, duration, keepalive, output, 
     args = COMPOSE + ["run", "--rm", "--no-deps", "-T"]
     kind = {"direct": "direct", "no_plugin": "none"}.get(implementation,
             "kong" if implementation.startswith("kong_") else "custom")
-    env = {"BENCH_URL": ("http://echo:8080" if implementation == "direct" else "http://gateway:8000") + fixture["path"],
+    env = {"BENCH_URL": ("http://benchmark-upstream:8080" if implementation == "direct" else "http://gateway:8000") + fixture["path"],
            "BENCH_CLIENT_MODE": "shared", "BENCH_CLIENT_ID": fixture["client"],
            "BENCH_KEEPALIVE": str(keepalive).lower(),
            "BENCH_IMPLEMENTATION": kind, "BENCH_GATEWAY_IPS": json.dumps(peers),
@@ -53,15 +53,16 @@ def resources():
     config = json.loads(command(COMPOSE + ["--profile", "*", "config", "--format", "json"]))
     settings = {}
     for service, conf in config["services"].items():
-        if service not in ("kong1", "kong2", "kong3", "redis", "postgres", "echo", "benchmark", "tests", "migrations"):
+        if service not in ("kong1", "kong2", "kong3", "redis", "postgres", "echo", "benchmark-upstream", "benchmark", "tests", "migrations"):
             continue
         settings[service] = {"cpus": float(conf.get("cpus", 0)),
                              "memory_bytes": int(conf.get("mem_limit", 0)),
                              "cpuset": conf.get("cpuset", "")}
-        if service in ("kong1", "kong2", "kong3", "redis", "postgres", "echo"):
+        if service in ("kong1", "kong2", "kong3", "redis", "postgres", "echo", "benchmark-upstream"):
             ids = command(COMPOSE + ["ps", "--quiet", service]).split()
             if ids:
                 container = json.loads(command(["docker", "inspect", ids[0]]))[0]
+                settings[service]["image"] = container["Image"]
                 actual = container["HostConfig"]
                 settings[service]["addresses"] = [network["IPAddress"] for network in
                     container["NetworkSettings"]["Networks"].values() if network.get("IPAddress")]
@@ -83,6 +84,7 @@ def markdown(report):
              f"{report['repeats']} repeats. Keepalive: `{report['keepalive']}`. "
              "Gateway traffic uses IPv4 DNS round robin; the direct control bypasses Kong. Runs are serial and implementation order rotates per repeat.",
              f"Kong async sync_rate: {report['kong_async_sync_rate']} seconds. Our implementations use synchronous Redis accounting.", "",
+             "Upstream: Go net/http, constant 512-byte JSON, HTTP/1.1 keepalive, no per-request logging.",
              f"Redis timeout for every limiter: {report['redis_timeout_ms']} ms.", "",
              "### CPU and memory settings", "",
              "CPU values are per-container quotas, not dedicated cores; zero means no explicit cap. All containers share the host.", "",
@@ -106,7 +108,7 @@ def markdown(report):
             median = statistics.median(rates)
             p95 = statistics.median(r["latency_ms"]["p(95)"] for r in runs)
             p99 = statistics.median(r["latency_ms"]["p(99)"] for r in runs)
-            label = {"direct": "Direct echo backend", "no_plugin": "Kong without plugins", "kong_sync": "Kong sync", "kong_async": "Kong async"}.get(implementation, "Custom " + implementation)
+            label = {"direct": "Direct Go backend", "no_plugin": "Kong without plugins", "kong_sync": "Kong sync", "kong_async": "Kong async"}.get(implementation, "Custom " + implementation)
             lines.append(f"| {workload} | {label} | {median:,.0f} ({min(rates):,.0f}–{max(rates):,.0f}) | "
                          f"{median / baseline:.2f}× | {p95:.3f} | {p99:.3f} | "
                          f"{sum(r['admitted_200'] for r in runs):,} / {sum(r['throttled_429'] for r in runs):,} |")
@@ -120,16 +122,17 @@ def markdown(report):
               "The throttled caller is primed until worker responses settle; this is a rejection-path benchmark, not an async overshoot or quota-accuracy test.",
               "- The fixed-window run is the closest functional comparison. The sliding-window run measures a different algorithm; "
               "it is not evidence that the plugins enforce identical rolling quotas.",
-              "- Direct echo bypasses Kong; the no-plugin Kong control attaches no plugins. These controls have admitted traffic only. "
+              "- Direct Go traffic bypasses Kong; the no-plugin Kong control attaches no plugins. These controls have admitted traffic only. "
               "All gateway samples use peer IPs mapped to Docker containers for attribution, with no observer plugin. "
               "Every gateway trial must hit all three nodes; custom responses must report Redis mode. "
               "The bundled plugin has no Redis-mode diagnostic: its configured policy, limiter header, fail-closed behavior, "
               "and absence of request errors are checked instead.",
               "- Values are medians across trials; p95/p99 columns are medians of per-trial percentiles, not pooled percentiles. "
               "Response latency excludes TCP connection setup. Raw reports include connection and iteration times, per-node distribution, and individual trials.",
-              "- Gateways, Redis, echo backend, and load generator share this Docker host without CPU pinning. "
-              "Admitted requests include the Python echo backend; denied requests do not. These are end-to-end results for this host, "
-              "not isolated plugin CPU measurements or production capacity guarantees.",
+              "- Gateways, Redis, Go backend, and load generator share this Docker host without CPU pinning. "
+              "Admitted requests include the constant-response Go backend; denied requests do not. These are end-to-end results for this host, "
+              "not isolated plugin CPU measurements or production capacity guarantees. "
+              "The echo service in the resource table is the separate Python integration/demo backend and is not a benchmark target.",
               "- Policies are fresh per trial and removed afterward; existing demo routes and data are preserved. "
               "Warmup requests are excluded from reported metrics but consume the same trial budget. "
               "Fresh same-day buckets have no previous-window traffic; window transitions are not measured.", ""]
@@ -172,6 +175,9 @@ def main():
               "environment": {"cpus": info["NCPU"], "memory_bytes": info["MemTotal"],
                               "architecture": info["Architecture"], "kernel": platform.release(),
                               "docker_version": info["ServerVersion"]}, "resources": resources(), "images": {}, "runs": []}
+    report["upstream"] = {"url": "http://benchmark-upstream:8080", "implementation": "Go net/http",
+                          "response_bytes": 512, "per_request_logging": False}
+    report["images"]["benchmark-upstream"] = report["resources"]["benchmark-upstream"]["image"]
     for tag in ("kong:3.9.4", "redis:7.4-alpine", "grafana/k6:1.3.0"):
         report["images"][tag] = command(["docker", "image", "inspect", tag, "--format", "{{.Id}}"]).strip()
     peers = {address: service for service, setting in report["resources"].items()

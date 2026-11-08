@@ -22,6 +22,9 @@ services:
   echo:
     cpus: 0.5
     mem_limit: 256m
+  benchmark-upstream:
+    cpus: 0.5
+    mem_limit: 256m
   benchmark:
     cpus: 1.0
     mem_limit: 512m

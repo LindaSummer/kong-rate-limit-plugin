@@ -8,6 +8,12 @@ start() {
   compose up -d --wait
 }
 
+start_benchmark() {
+  start >&2
+  compose build benchmark-upstream tests >&2
+  compose up -d --wait benchmark-upstream >&2
+}
+
 case "${1:-start}" in
   start)
     start
@@ -29,13 +35,13 @@ case "${1:-start}" in
     compose run --rm --no-deps tests uv run --frozen --no-sync python window_configure.py
     ;;
   benchmark-compare)
-    start
-    compose build tests
+    start_benchmark
     shift
     python3 test/compare_benchmarks.py "$@"
     ;;
   benchmark)
-    start
+    start_benchmark
+    compose run --rm --no-deps tests uv run --frozen --no-sync python window_configure.py --benchmark >&2
     shift
     compose run --rm --no-deps benchmark run "$@" /test/benchmark.js
     ;;

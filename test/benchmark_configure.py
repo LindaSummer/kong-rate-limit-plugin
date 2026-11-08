@@ -5,7 +5,9 @@ import sys
 import time
 import uuid
 
-from common import PROXIES, admin, http
+from common import PROXIES, admin, http, probe_gateways
+
+UPSTREAM = "http://benchmark-upstream:8080"
 
 
 def cleanup(entities):
@@ -28,7 +30,8 @@ def prepare(implementation, workload, sync_rate=0.1, redis_timeout_ms=1000):
     client = name + "-measured"
     if implementation == "direct":
         assert workload == "admitted", "Direct backend has no throttled workload"
-        assert http("http://echo:8080" + path)[0] == 200
+        status, headers, body = http(UPSTREAM + path)
+        assert status == 200 and headers.get("Content-Length") == "512" and body == {"ok": True}, "Go benchmark upstream unavailable"
         return {"entities": entities, "path": path, "client": client,
                 "plugin": None, "config": {}, "threshold": None}
     if implementation == "no_plugin":
@@ -47,7 +50,7 @@ def prepare(implementation, workload, sync_rate=0.1, redis_timeout_ms=1000):
                   "limits": [{"algorithm": implementation, "window_ms": 86400000,
                               "limit": threshold, "dimensions": ["client_id"]}]}
     try:
-        service = admin("/services", "POST", {"name": name, "url": "http://echo:8080"})
+        service = admin("/services", "POST", {"name": name, "url": UPSTREAM})
         entities["services"].append(service["id"])
         route = admin("/routes", "POST", {"paths": [path], "strip_path": False,
                                           "service": {"id": service["id"]}})
@@ -59,7 +62,9 @@ def prepare(implementation, workload, sync_rate=0.1, redis_timeout_ms=1000):
         started = time.monotonic()
         stable = 0
         while time.monotonic() - started < 30:
-            results = [http(url + path, headers={"X-Client-Id": uuid.uuid4().hex}) for url in PROXIES]
+            # Quiet probes can repeatedly hit just one worker per node.
+            # Exercise every node under concurrency before measuring any traffic.
+            results = probe_gateways(path)
             def ready(result):
                 status, headers, _ = result
                 if implementation == "no_plugin":
@@ -87,7 +92,7 @@ def prepare(implementation, workload, sync_rate=0.1, redis_timeout_ms=1000):
             started = time.monotonic()
             stable = 0
             while time.monotonic() - started < 30:
-                responses = [http(url + path, headers={"X-Client-Id": client}) for url in PROXIES]
+                responses = probe_gateways(path, client)
                 stable = stable + 1 if all(r[0] == 429 for r in responses) else 0
                 if stable >= 15 and time.monotonic() - started >= 2:
                     break

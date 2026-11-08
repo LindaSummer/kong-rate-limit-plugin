@@ -9,7 +9,7 @@ const peers = JSON.parse(__ENV.BENCH_GATEWAY_IPS || '{}');
 if (!['custom', 'kong', 'none', 'direct'].includes(implementation)) throw new Error('Invalid BENCH_IMPLEMENTATION');
 if (!['mixed', '200', '429'].includes(expectedStatus)) throw new Error('Invalid BENCH_EXPECTED_STATUS');
 
-const target = __ENV.BENCH_URL || 'http://gateway:8000/window/a';
+const target = __ENV.BENCH_URL || 'http://gateway:8000/benchmark/a';
 const clientMode = __ENV.BENCH_CLIENT_MODE || 'shared';
 const keepAlive = (__ENV.BENCH_KEEPALIVE || 'false') === 'true';
 if (!['shared', 'per-vu', 'unique'].includes(clientMode)) {

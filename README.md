@@ -44,11 +44,11 @@ days, including failed runs. No repository secrets or source Kong build are need
 | Kong proxies | `http://localhost:8100`, `:8200`, `:8300` |
 | Kong Admin APIs | `http://localhost:8101`, `:8201`, `:8301` (localhost only) |
 | Redis | `127.0.0.1:6380` (internal address `redis:6379`) |
-| PostgreSQL / echo | Internal Compose network only |
+| PostgreSQL / Python echo / Go benchmark upstream | Internal Compose network only |
 
 ```text
 kong/plugins/rate-limiting-sliding-window/  Plugin and implementation notes
-test/                                     Echo server, configuration, tests, k6
+test/                                     Python integration echo, Go benchmark server, tests, k6
 .github/workflows/integration.yml          Integration CI
 compose.yaml                              Three gateways, PostgreSQL, Redis, echo
 run.sh                                    Start, test, benchmark, stop
@@ -247,8 +247,13 @@ For a fresh checkout, start the stack and benchmark its default demo:
 ./run.sh benchmark --vus 20 --duration 30s
 ```
 
-The benchmark targets `http://gateway:8000/window/a` by default. It preserves
-installed policies, uses a fresh shared ClientId per run, and reports total
+Both benchmark commands build a separate Go HTTP upstream. It returns constant
+512-byte JSON over HTTP/1.1 without per-request logging; host Go is not required.
+The Python echo server remains the upstream for normal demos and integration tests.
+
+The standalone benchmark installs its own service-scoped demo at `/benchmark/a`
+and `/benchmark/b`, leaving `/window/*` and user policies intact. It targets
+`http://gateway:8000/benchmark/a`, uses a fresh shared ClientId per run, and reports total
 requests/second, 200 admissions, 429 throttles, unexpected responses, Redis/local
 mode, latency percentiles, connection time, and per-gateway request counts.
 429 is an expected rate-limit decision rather than a transport failure. The run
@@ -281,7 +286,7 @@ BENCH_URL=http://gateway:8000/my-route \
 # Save the final JSON report; --quiet suppresses k6's banner/progress.
 ./run.sh benchmark --quiet --vus 20 --duration 30s > /tmp/kong-benchmark.json
 
-# Run k6 directly inside Compose (start/configure the stack first).
+# Run k6 directly after ./run.sh benchmark has started/configured its Go demo.
 docker compose run --rm --no-deps benchmark run --vus 20 --duration 30s /test/benchmark.js
 ```
 
@@ -307,7 +312,7 @@ shared-client throttling. CLI `--vus`/`--duration` override environment defaults
 
 The demo has small quotas, so shared-client runs predominantly measure the 429
 path. For admission throughput, use unique clients or configure larger limits on
-your target policy. Results include all applicable plugins, the Python echo backend for admitted requests,
+your target policy. Results include all applicable plugins, the Go backend for admitted requests,
 and the resources shared by containers on this host. They are not isolated
 measurements of the new plugin's execution time. Do not run benchmarks alongside
 integration suites against this Compose project.
