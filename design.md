@@ -30,31 +30,27 @@ The MVP extends Kong with a custom rate-limiting plugin. Kong owns routing and
 configuration; the plugin owns window algorithms and counter backends.
 
 ```mermaid
-block-beta
-    columns 2
+flowchart TB
+    subgraph Gateway["Kong gateway — each node"]
+        Routing["Routes and services<br/>Matching and grouping"]
+        Config["Scoped plugin configuration<br/>Limits, windows, dimensions"]
 
-    block:Gateway:2
-        columns 2
-        Kong["Kong gateway — each node"]:2
-        Routing["Routes and services — matching and grouping"]:2
-        Config["Scoped plugin configuration — limits, windows, dimensions"]:2
-
-        block:Plugin:2
-            columns 2
-            PluginTitle["Rate-limiting plugin"]:2
-            Fixed["Fixed-window limiter"] Sliding["Approximate sliding-window limiter"]
-            Backends["Counter backends — Redis primary, local fallback"]:2
-            RedisAdapter["Redis counter backend"] Local["Local fallback — node-local shared memory"]
+        subgraph Plugin["Rate-limiting plugin"]
+            Windows["Fixed-window / approximate sliding-window limiters"]
+            Counters["Counter backends"]
+            Local["Local fallback<br/>Node-local shared memory"]
+            Windows --> Counters
+            Counters -.-> Local
         end
 
-        Proxy["Kong HTTP proxy — transparent upstream Retry-After passthrough"]:2
+        Proxy["Kong HTTP proxy<br/>Transparent upstream Retry-After passthrough"]
+        Routing --> Config --> Windows
+        Windows --> Proxy
     end
 
-    space:2
-    Redis[("Redis — shared budgets across gateway nodes")]
+    Redis[("Redis<br/>Shared budgets across gateway nodes")]
     Upstream["Upstream services"]
-
-    RedisAdapter --> Redis
+    Counters --> Redis
     Proxy --> Upstream
 ```
 
