@@ -6,6 +6,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 PROXIES = os.environ.get("PROXIES", "http://kong1:8000,http://kong2:8000,http://kong3:8000").split(",")
 ADMIN = os.environ.get("ADMIN", "http://kong1:8001")
@@ -66,14 +67,25 @@ def redis(*args):
         return read()
 
 
-def bootstrap():
-    """Install the default window demo and wait for every gateway to adopt it."""
+def probe_gateways(path, client=None):
+    """Exercise multiple workers on every node, rather than quiet serial probes."""
+    def request(index):
+        caller = client or "probe-" + uuid.uuid4().hex
+        return http(PROXIES[index % len(PROXIES)] + path, headers={"X-Client-Id": caller})
+
+    with ThreadPoolExecutor(max_workers=24) as pool:
+        return list(pool.map(request, range(48)))
+
+
+def bootstrap(upstream="http://echo:8080", service_name="window-demo", prefix="/window",
+              redis_timeout_ms=150):
+    """Install a service-scoped demo and wait for every gateway to adopt it."""
     name = "rate-limiting-sliding-window"
-    service = admin("/services/window-demo", "PUT", {"url": "http://echo:8080"})
+    service = admin("/services/" + service_name, "PUT", {"url": upstream})
     plugins = admin('/services/' + service["id"] + '/plugins')["data"]
     existing = next((plugin for plugin in plugins if plugin["name"] == name), None)
     payload = {"name": name, "config": {
-        "redis": {"host": "redis", "timeout": 150},
+        "redis": {"host": "redis", "timeout": redis_timeout_ms},
         "limits": [
             {"algorithm": "fixed_window", "window_ms": 1000, "limit": 5, "dimensions": ["client_id"]},
             {"algorithm": "sliding_window", "window_ms": 60000, "limit": 30, "dimensions": ["client_id"]},
@@ -81,18 +93,17 @@ def bootstrap():
     plugin = admin('/plugins/' + existing["id"], "PATCH", payload) if existing else admin(
         '/services/' + service["id"] + '/plugins', "POST", payload)
     for suffix in ("a", "b"):
-        admin('/routes/window-demo-' + suffix, "PUT", {
-            "paths": ['/window/' + suffix], "strip_path": False,
+        admin('/routes/' + service_name + '-' + suffix, "PUT", {
+            "paths": [prefix + '/' + suffix], "strip_path": False,
             "service": {"id": service["id"]}})
     started = time.monotonic()
     stable = 0
     while time.monotonic() - started < 30:
-        responses = [http(url + "/window/a", headers={"X-Client-Id": "bootstrap-" + uuid.uuid4().hex})
-                     for url in PROXIES]
+        responses = probe_gateways(prefix + "/a")
         if all(status == 200 and headers.get("X-RateLimit-Mode") == "redis"
                and headers.get("X-RateLimit-Remaining") == "4" for status, headers, _ in responses):
             stable += 1
-            if stable >= 5 and time.monotonic() - started >= 1.5:
+            if stable >= 5 and time.monotonic() - started >= 4:
                 return plugin
         else:
             stable = 0

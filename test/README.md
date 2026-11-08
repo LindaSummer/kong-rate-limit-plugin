@@ -1,14 +1,15 @@
 # Test cases and benchmarks
 
-This directory contains the echo backend, policy setup, automated correctness
-tests, and k6 benchmark for `rate-limiting-sliding-window`. Run all commands below
+This directory contains the Python integration echo, Go benchmark upstream,
+policy setup, automated correctness tests, and k6 benchmark for `rate-limiting-sliding-window`. Run all commands below
 from the repository root with Docker Engine and Compose v2 available.
 
 ## Environment and full suite
 
 The Compose environment uses three official `kong:3.9.4` gateways with two workers
 each, PostgreSQL for configuration, Redis 7.4 for counters, and a Python echo
-backend. Tests call all three gateways directly; benchmarks use their shared
+backend. Benchmarks build a separate constant-response Go server. Tests call
+all three gateways directly; benchmarks use their shared
 `gateway` DNS alias.
 
 ```sh
@@ -44,7 +45,8 @@ responses have separate parameterized cases. Default pytest selection runs the
 | [pyproject.toml](pyproject.toml) / [uv.lock](uv.lock) / [Dockerfile](Dockerfile) | Python 3.12 test project, locked dependencies, and uv test image. |
 | [window_configure.py](window_configure.py) | Install the default policy and wait for all gateways to adopt it. |
 | [common.py](common.py) | Standard-library HTTP, Admin API, Redis RESP, and setup helpers. |
-| [echo.py](echo.py) | Echo requests and simulate upstream 429/503 responses. |
+| [echo.py](echo.py) | Python integration backend: echo requests and simulate upstream 429/503 responses. |
+| [upstream-go/main.go](upstream-go/main.go) / [Dockerfile](upstream-go/Dockerfile) | Standard-library Go benchmark server: constant 512-byte JSON, HTTP/1.1, no per-request logging; pinned Go builder and non-root scratch runtime. |
 | [benchmark.js](benchmark.js) | k6 load generation, checks, gateway distribution, and JSON report. |
 
 ## Unit coverage
@@ -179,9 +181,12 @@ Lua edits, restart all gateways before HTTP testing; workers cache loaded module
 ## Benchmark scenarios
 
 The benchmark uses k6 1.3.0 and GET requests with a five-second timeout. Defaults
-are 20 virtual users for 30 seconds against `http://gateway:8000/window/a`. It
-generates load continuously without a per-request sleep. Run `./run.sh start`
-first: the benchmark command starts containers but does not install a policy.
+are 20 virtual users for 30 seconds against `http://gateway:8000/benchmark/a`. It
+generates load continuously without a per-request sleep. `./run.sh benchmark`
+builds and starts the Go upstream and installs a separate benchmark demo: five
+per fixed second and 30 per sliding minute per client, shared by `/benchmark/a`
+and `/benchmark/b`. Normal `/window/*` demos and integration tests retain Python.
+No host Go installation is required; Docker builds with Go 1.27.2.
 
 | Case | Command | What it exercises |
 | --- | --- | --- |
@@ -195,6 +200,133 @@ new one. In `per-vu` mode the script appends the VU number, and in `unique` mode
 it appends both VU and iteration numbers. `BENCH_VUS` and `BENCH_DURATION` supply
 defaults; CLI `--vus` and `--duration` override them. Benchmarking does not modify
 installed policies or reset counters. Reusing a base ClientId can reuse budgets.
+
+### Compare against Kong's bundled plugin
+
+Measured reports belong in PR conversations and Actions artifacts, not Git.
+The output directory is local; generated report directories under `test/` are ignored.
+
+```sh
+./run.sh benchmark-compare --vus 20 --duration 15 --warmup 3 --repeats 3 --keepalive \
+  --output /tmp/kong-rate-limit-comparison
+```
+
+This command also requires host Python 3 (standard library only). It starts the
+stack, builds the uv test image, and creates temporary service-scoped policies
+for the bundled `rate-limiting` plugin in sync and async modes and our
+fixed/sliding implementations. All comparison policies target the Go upstream
+at `benchmark-upstream:8080`; they do not use the Python integration echo.
+It preserves existing demo policies and removes each trial's entities afterward.
+
+All four limiter modes use one daily limit on `X-Client-Id`, backed by the same Redis. The
+bundled plugin uses `policy=redis` and `fault_tolerant=false`. Sync uses
+`sync_rate=-1`; async defaults to `sync_rate=0.1` seconds, configurable with
+`--kong-async-sync-rate`. Our implementations both use synchronous Redis accounting.
+All limiter modes use the same Redis timeout, defaulting to 1,000 ms and
+configurable with `--redis-timeout-ms`. This tolerates scheduling pauses on the
+shared CPU-capped runner; zero local-fallback and expected-status checks remain
+strict. The timeout is included in each report.
+Our limit uses `[client_id]`, `window_ms=86400000`, and the selected algorithm.
+The daily window avoids short reset boundaries during samples. Trials refuse
+to start too close to the UTC day boundary.
+
+Two additional controls establish the underlying request-path performance:
+
+- **Direct Go backend:** target `benchmark-upstream:8080`, bypassing Kong entirely.
+- **Kong without plugins:** create a temporary service and route with no plugins
+  attached. This includes gateway proxying and the Go backend, with no limiter
+  or observation plugin.
+
+Controls run only in the admitted workload because they cannot throttle traffic.
+The report lists their throughput and latency beside Kong sync/async and our two
+algorithms. Gateway controls still exercise all three nodes; direct-backend
+samples omit gateway-distribution checks.
+
+Two workloads isolate response paths:
+
+- **Admitted:** a shared caller with limit 1,000,000; every measured response must
+  be 200. A shared caller keeps key cardinality comparable across plugins.
+- **Throttled:** a shared caller with limit one, consumed before warmup; every
+  measured response must be 429.
+
+Each trial has a separate warmup followed by a measured sample. Fresh policies
+and caller identities prevent carryover between trials. Runs are serial, and
+implementation order rotates across repeats. Gateway attribution uses k6
+`remote_ip` mapped to the Docker IP of each node; no observer plugin is attached.
+Concurrent readiness probes exercise multiple workers on every node before
+load starts. All three gateways must receive traffic. Custom responses must report Redis
+mode; the baseline's standard limit header is checked because the bundled
+plugin does not expose an equivalent mode header. Baseline `redis_requests` is
+`null`, rather than claiming an observed Redis-mode count.
+
+Async caches are per worker. For throttled traffic, preparation waits until
+responses settle at 429 across gateways before warmup. This excludes transient
+priming admissions from the measurements. Async throughput has different quota
+consistency guarantees; this comparison does not measure async overshoot.
+
+The output directory contains raw warmup/measured JSON and stderr logs,
+`report.json` with host CPU/RAM, configured container CPU/memory/pinning settings,
+observed settings for persistent containers, Go upstream identity and image ID,
+source revision, per-trial
+policies and results, and `report.md` suitable for a PR comment. Warmups are excluded from
+reported rates. Summary tables use median request rates with min/max ranges;
+latency columns are medians of per-trial p95/p99 values, not pooled percentiles.
+The CI and full local comparisons use `--keepalive` and the HTTP/1.1 Go backend
+to avoid exhausting client source ports in direct-backend samples. The server
+returns exactly 512 bytes of JSON and performs no request serialization or access
+logging, reducing upstream work that can hide limiter differences. The comparison defaults to keepalive; `--no-keepalive` is available for explicit
+connection-churn experiments, which can hit source-port limits. The standalone
+`./run.sh benchmark` keeps its original new-connection default. Do not mix these
+settings in one comparison.
+
+Ratios in the table use Kong sync as the denominator. The fixed-window
+comparison with Kong sync is the closest functional baseline. Sliding windows
+perform different accounting, so their result measures that implementation's
+cost rather than equivalent quota accuracy. All containers share the host without
+CPU pinning, and admitted requests include Go upstream processing. Interpret
+results as end-to-end measurements for the recorded host and settings. Historical
+Python-backed results measure a different upstream workload; compare limiter
+modes within the same recorded run.
+
+### Automatic PR benchmark and resource settings
+
+[The benchmark workflow](../.github/workflows/benchmark.yml) runs automatically on
+PR creation, new commits, reopening, and readiness for review, and supports manual
+dispatch. It uses Ubuntu 24.04, 10 VUs, 2-second warmups, 10-second measurements,
+three repeats, keepalive enabled, and a 0.1-second Kong async interval. It runs independently of the
+correctness suite on an isolated Compose project.
+
+Both direct-backend and plugin-free gateway controls are included automatically.
+
+The workflow sets `COMPOSE_FILE=compose.yaml:compose.benchmark.yaml`. The
+[benchmark overlay](../compose.benchmark.yaml) applies these per-container caps:
+
+| Service | CPU quota | Memory limit |
+| --- | ---: | ---: |
+| Each Kong node (two workers) | 0.5 CPU | 768 MiB |
+| Redis | 0.5 CPU | 256 MiB |
+| PostgreSQL | 0.5 CPU | 512 MiB |
+| Go benchmark upstream | 0.5 CPU | 256 MiB |
+| Python integration echo (idle during comparisons) | 0.5 CPU | 256 MiB |
+| k6 | 1 CPU | 512 MiB |
+| Python helpers | 0.25 CPU | 256 MiB |
+| Migrations (startup only) | 0.5 CPU | 768 MiB |
+
+These are quotas, not dedicated cores; CPUs are not pinned. The report captures
+the actual runner CPU count and RAM instead of assuming a hosted-runner size.
+Local runs without the overlay remain uncapped and explicitly report that.
+To reproduce CI caps locally, use an isolated project or stop other runs before
+setting the same `COMPOSE_FILE` environment variable. Do not apply the overlay
+to an active demo as an incidental test step.
+
+The workflow uploads Markdown, raw JSON, and logs as `rate-limit-benchmark`
+artifacts for seven days and adds the report to the job summary. A separate job
+with no source checkout creates or updates one bot comment in the PR, linking the
+artifacts. Failed runs also update the comment with status and available logs;
+an older revision cannot replace the current head's comment. Comment publishing
+is enabled for same-repository PRs. Fork PRs run the benchmark and upload artifacts,
+but GitHub's read-only fork token cannot post the comment. No repository secrets
+are required. The report job reads artifact text as data and does not execute it.
 
 ### DNS and connection behavior
 
@@ -231,9 +363,10 @@ The JSON report includes:
 
 Preserve the report with the source revision, policy, host resources, and load
 settings when comparing runs. Results include gateway processing, Redis, network
-costs, all applicable plugins, and the echo backend for admitted requests. A
+costs, all applicable plugins, and the Go backend for admitted requests. A
 mostly-429 run does not measure admitted-request throughput. This README defines
-the cases and report format; it does not establish a performance baseline.
+the cases and report format. `benchmark-compare` produces a measured baseline
+for a particular host and run; it is not a production capacity guarantee.
 
 ## Coverage limits
 
@@ -241,4 +374,5 @@ Sliding-window checks validate the two-counter approximation, not an exact rolli
 window. The suite does not establish a strict global quota during Redis outages,
 recovery, clock skew, or configuration propagation: fallback budgets are per node.
 It does not cover async synchronization, Redis Cluster, or production-scale
-capacity. GitHub Actions runs the correctness suite; k6 benchmarks are separate.
+capacity. GitHub Actions runs correctness and benchmarks in separate workflows;
+benchmark reports are not throughput gates.

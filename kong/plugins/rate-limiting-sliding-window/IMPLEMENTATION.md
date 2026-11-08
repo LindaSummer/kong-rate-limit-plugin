@@ -198,3 +198,43 @@ separate k6 command using round-robin DNS across all three gateways; correctness
 CI does not run k6 or enforce a throughput target. See the
 [test case and benchmark guide](../../../test/README.md) for exact assertions,
 selection commands, benchmark modes, metrics, and coverage limits.
+
+## Bundled-plugin benchmark baseline
+
+`./run.sh benchmark-compare` provisions temporary service-scoped policies for
+Kong's bundled `rate-limiting` in sync and async modes and our fixed/approximate
+sliding windows. All use
+one Redis-backed daily limit on the same ClientId header, with separate admitted
+and pre-exhausted throttled workloads. Kong sync uses `sync_rate=-1`; async uses
+a configurable interval (default 0.1 seconds). Both fail closed on Redis errors.
+Our implementations use synchronous Redis accounting. Async caches settle before
+timing throttled traffic; this is not a comparison of overshoot guarantees. Both configurations have the
+same peer-IP gateway attribution. No observer plugin is attached. Additional
+admitted-only controls target the Go backend directly and Kong with no plugins,
+separating backend, gateway, and limiter costs.
+
+The host orchestrator `test/compare_benchmarks.py` runs serial trials with a warmup
+per trial and rotates implementation order across repeats. It retains raw k6
+JSON, policy configuration, source revision, image IDs, and host resource metadata,
+then generates a Markdown report with median throughput, ranges, and per-trial
+latency percentiles. Fixed windows provide the closest comparison; sliding
+windows have different semantics. These end-to-end results include shared-host
+contention and the Go backend for admitted traffic. Benchmarks have a separate automatic PR workflow from correctness CI.
+
+Measured results are not committed. PR conversations contain the current reports;
+Actions artifacts retain Markdown, raw JSON, and logs for seven days. The automatic
+PR benchmark workflow compares Kong sync/async with both custom windows, using
+`compose.benchmark.yaml` CPU/memory quotas. Reports list host CPU/RAM plus each
+container's quotas and CPU pinning. Local runs without the overlay are explicitly
+reported as uncapped. A separate reporting job updates the same-repository PR
+comment without checking out or executing PR source. Fork runs retain artifacts
+without comment publishing because their token is read-only.
+
+Benchmark traffic uses the dedicated `benchmark-upstream` Go service, built with
+Go 1.27.2 into a non-root scratch image. It returns constant 512-byte JSON over
+HTTP/1.1 without request logging. Integration tests and normal demos retain the
+Python echo backend and its upstream-error simulations. Both benchmark commands
+start the Go service; the standalone command configures separate `/benchmark/*`
+demo routes. Reports identify the upstream image and resource limits. Concurrent
+readiness probes exercise all gateway workers before sampling, avoiding stale
+route/plugin caches on otherwise idle workers.

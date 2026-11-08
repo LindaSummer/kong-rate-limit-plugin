@@ -92,6 +92,10 @@ services:
     image: python:3.12-slim-trixie
     command: [python, -u, /test/echo.py]
     volumes: ["./test:/test:ro"]
+  benchmark-upstream:
+    build:
+      context: ./test/upstream-go
+    profiles: [benchmark]
   tests:
     build:
       context: .
@@ -107,12 +111,15 @@ services:
     command: [run, /test/benchmark.js]
     environment:
       K6_NO_USAGE_REPORT: "true"
-      BENCH_URL: ${BENCH_URL:-http://gateway:8000/window/a}
+      BENCH_URL: ${BENCH_URL:-http://gateway:8000/benchmark/a}
       BENCH_VUS: ${BENCH_VUS:-20}
       BENCH_DURATION: ${BENCH_DURATION:-30s}
       BENCH_KEEPALIVE: ${BENCH_KEEPALIVE:-false}
       BENCH_CLIENT_MODE: ${BENCH_CLIENT_MODE:-shared}
       BENCH_CLIENT_ID: ${BENCH_CLIENT_ID:-}
+      BENCH_IMPLEMENTATION: ${BENCH_IMPLEMENTATION:-custom}
+      BENCH_EXPECTED_STATUS: ${BENCH_EXPECTED_STATUS:-mixed}
+      BENCH_EXPECTED_LIMIT: ${BENCH_EXPECTED_LIMIT:-}
     volumes: ["./test:/test:ro"]
     depends_on:
       kong1:
@@ -120,6 +127,8 @@ services:
       kong2:
         condition: service_healthy
       kong3:
+        condition: service_healthy
+      benchmark-upstream:
         condition: service_healthy
 volumes:
   postgres-data:

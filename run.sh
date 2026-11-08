@@ -2,10 +2,16 @@
 set -eu
 cd "$(dirname "$0")"
 
-compose() { docker compose -f compose.yaml "$@"; }
+compose() { docker compose "$@"; }
 
 start() {
   compose up -d --wait
+}
+
+start_benchmark() {
+  start >&2
+  compose build benchmark-upstream tests >&2
+  compose up -d --wait benchmark-upstream >&2
 }
 
 case "${1:-start}" in
@@ -28,11 +34,17 @@ case "${1:-start}" in
     compose run --rm --no-deps tests uv run --frozen --no-sync pytest -v -m restart test_restart.py
     compose run --rm --no-deps tests uv run --frozen --no-sync python window_configure.py
     ;;
+  benchmark-compare)
+    start_benchmark
+    shift
+    python3 test/compare_benchmarks.py "$@"
+    ;;
   benchmark)
-    start
+    start_benchmark
+    compose run --rm --no-deps tests uv run --frozen --no-sync python window_configure.py --benchmark >&2
     shift
     compose run --rm --no-deps benchmark run "$@" /test/benchmark.js
     ;;
-  stop) compose down ;;
-  *) echo "Usage: $0 [start|test|stop|benchmark [k6 run options]]" >&2; exit 2 ;;
+  stop) compose --profile '*' down ;;
+  *) echo "Usage: $0 [start|test|stop|benchmark [k6 run options]|benchmark-compare [options]]" >&2; exit 2 ;;
 esac

@@ -28,6 +28,48 @@ So use curreent Kong with a customer plugin should be a good choice for the MVP.
 
 The architecture based on exsiting kong stack, leverage kong customer plugin and designed a sliding window ratelimit based on both redis and local in-memory cache.
 
+```mermaid
+flowchart TD
+    Client["Client request"] --> Route
+
+    subgraph Kong["Kong gateway"]
+        Route["Match route and service using Kong routing rules"]
+        Route --> Config["Select plugin configuration using Kong scope precedence"]
+        Config --> Identity["Build counter identities from scope and configured dimensions"]
+
+        subgraph Plugin["Rate-limiting sliding-window plugin"]
+            Identity --> Algorithm{"Algorithm for each configured limit"}
+            Algorithm --> Fixed["Fixed-window limiter"]
+            Algorithm --> Sliding["Approximate sliding-window limiter"]
+            Fixed --> Storage{"Redis circuit available?"}
+            Sliding --> Storage
+
+            Storage -->|Yes| Redis["Redis: shared counters across gateway nodes"]
+            Storage -->|No| Local["Local fallback: independent counters per gateway node"]
+            Redis -->|Operation succeeds| Budget{"All limits allow the request?"}
+            Redis -->|Connection, timeout, or operation failure| Local
+            Local --> Budget
+        end
+
+        Budget -->|No| Rejected["Return 429 with limiter-generated Retry-After"]
+        Budget -->|Yes| Proxy["Proxy request to upstream"]
+        Response["Forward upstream status and headers unchanged, including Retry-After"]
+    end
+
+    Proxy --> Upstream["Upstream service"]
+    Upstream --> Response
+    Response --> ClientResponse["Client response"]
+    Rejected --> ClientResponse
+```
+
+Kong routes and services select the applicable plugin configuration; configured
+dimensions define counter identity. Each limit uses its configured fixed or
+approximate sliding window with Redis counters, falling back to node-local
+counters when Redis is unavailable. All limits must allow the request before it
+reaches the upstream. Upstream responses, including any `Retry-After` header,
+pass through transparently; the plugin generates its own `Retry-After` only when
+it rejects a request.
+
 The rule matching leverages Kong's existing routing and service definitions to determine which requests should be subject to rate limiting.
 
 The Redis mode is the primary mode for rate limiting, ensuring strong consistency across multiple instances of the gateway.
