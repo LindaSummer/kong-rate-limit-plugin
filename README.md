@@ -102,6 +102,23 @@ The MVP implements both fixed and approximate sliding windows. Fixed windows pro
 
 Each limit is configured through the custom plugin, including its algorithm, window duration, threshold, and counter dimensions.
 
+##### Sliding-window pros and cons
+
+The two-counter approximation is inspired by [Cloudflare's sliding-window description](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/#sliding-windows-to-the-rescue): current usage plus a decreasing weight of the previous window's usage.
+
+**Pros**
+
+- Previous-window memory reduces the abrupt budget reset and boundary bursts of fixed windows.
+- Only two counters participate in each decision, avoiding a per-request timestamp log and keeping calculation work constant per limit.
+
+**Cons**
+
+- Weighting assumes traffic was spread uniformly across the previous window. It can overestimate or underestimate exact rolling usage.
+- Compared with fixed windows, it reads an additional counter and performs a weighted calculation.
+- It still allows bursts within the available budget; it does not queue requests or maintain a constant upstream rate.
+
+See [PR #6](https://github.com/LindaSummer/kong-rate-limit-plugin/pull/6) for implementation tradeoffs, traffic illustrations, measured results, and reproduction details.
+
 #### Distributed Consistency with Redis
 
 The design draws on Kong's Redis policy and Traefik's Redis limiter: Redis-side atomic operations allow multiple gateway nodes to coordinate shared counters. Kong's synchronous and asynchronous modes also provide a reference for evaluating the tradeoff between consistency and throughput.
@@ -137,6 +154,7 @@ Redis errors alone do not make requests unavailable. Local enforcement can still
 3. If async optimization does not achieve the desired performance improvement, optimize the rate-limiting plugin through techniques such as sharding, sub-windows, and local caching to reduce Redis network and Lua engine overhead under high traffic conditions.
    We can learn from an example: [Kong Scalable Rate Limiter](https://dream11.github.io/kong-scalable-rate-limiter/).
 4. Add metrics and monitoring to track the performance and effectiveness of the rate-limiting plugin, including the number of requests limited, fallback occurrences, and Redis latency. Integrating with OpenTelemetry would support centralized observability.
+5. Add a configuration parameter to choose whether rejected requests (HTTP 429) increment usage counters. Keep counting all attempts as the default penalty policy; optionally exclude rejected attempts so retries do not extend throttling. Compare recovery and retry behavior under both settings, while preserving atomic per-bucket admission and conditional increments. Evaluate adapting [Cloudflare's approach](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/#sliding-windows-to-the-rescue), which combines asynchronous counting with a cached mitigation decision and an expiry time; this mitigation cache is a separate design choice from whether rejected requests consume counters.
 
 ##### Benchmark comparison with Kong
 

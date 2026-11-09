@@ -1,0 +1,12 @@
+# Used with compose.yaml by illustrate_windows.py in a unique project.
+services:
+  window-observer:
+    image: python:3.12-slim-trixie
+    profiles: [illustration]
+    command: [python, -u, /test/window_observer.py]
+    volumes: ["./test:/test:ro"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=1).read()"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
