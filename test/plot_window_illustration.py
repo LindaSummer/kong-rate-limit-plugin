@@ -149,7 +149,12 @@ def plot_retries(data, rows, output):
     fig, axes = plt.subplots(2, 2, figsize=(13, 8), sharex=True, sharey=True, layout="constrained")
     reference = data["retry_start_ms"] * 1_000_000
     duration = (data["boundary_ms"] + data["duration_seconds"] * 1000 - data["retry_start_ms"]) / 1000
-    bins = np.arange(0, math.ceil(duration) + 1)
+    retry_rows = [r for r in rows if r["scenario"] in ("retry-ignore", "retry-follow")]
+    # Requests sent before the deadline can arrive upstream after it.
+    offsets = [(r[field] - reference) / 1e9 for r in retry_rows
+               for field in ("timestamp", "upstream_timestamp") if r[field] is not None]
+    right = max(duration, max(offsets, default=0))
+    bins = np.arange(0, math.ceil(right) + 1)
     for row, behavior in enumerate(("retry-ignore", "retry-follow")):
         for col, algorithm in enumerate(("fixed_window", "sliding_window")):
             ax = axes[row, col]
@@ -169,7 +174,7 @@ def plot_retries(data, rows, output):
                     ha="right", va="top", fontsize=10)
             ax.set_xlabel("Seconds since identical initial overload")
             ax.set_ylabel("Requests per 1 s bucket")
-            ax.set_xlim(0, duration)
+            ax.set_xlim(0, right)
             ax.yaxis.set_major_locator(MaxNLocator(integer=True))
             ax.grid(axis="y", alpha=.2)
     handles, labels = axes[0, 0].get_legend_handles_labels()

@@ -418,6 +418,14 @@ uv run --no-project --with matplotlib==3.10.8 --with pyarrow==22.0.0 \
   python test/illustrate_windows.py --output /tmp/kong-window-capture
 ```
 
+Optional regression checks for retry scheduling, the capture deadline, and late
+upstream arrivals:
+
+```sh
+uv run --no-project --with matplotlib==3.10.8 --with pyarrow==22.0.0 \
+  python test/window_illustration_unit.py
+```
+
 Defaults: 20 attempts per 10-second window, ClientId dimension, synchronous Redis
 accounting across all three gateways, and 60 seconds after the first boundary.
 Use `--limit`, `--window-ms`, and `--duration-seconds` to change the capture.
@@ -432,6 +440,11 @@ Use `--limit`, `--window-ms`, and `--duration-seconds` to change the capture.
 Each request must use Redis mode and return 200 or 429. The observer independently
 records upstream ingress, excludes readiness probes, and verifies that observed
 request IDs exactly match HTTP 200 responses. Requests rotate across gateways.
+Regular retry attempts target 200 ms between request starts, without adding
+response latency to that interval. Requests are sequential; responses longer
+than 200 ms reduce the offered rate. Retry-After pauses start at response receipt.
+The deadline prevents new sends and caps scheduled waits; in-flight requests may
+finish afterward, and plots include their recorded upstream arrivals.
 All attempts, including denials, consume the plugin's counters; the experiment
 does not alter the algorithm or accounting policy.
 

@@ -30,6 +30,49 @@ def wait_until(target_ms):
         time.sleep(min(remaining, 0.05))
 
 
+def retry_client(algorithm, behavior, start_ms, end_ms, *, run, paths, limit):
+    # Each behavior has an independent budget and the same initial overload.
+    wait_until(start_ms)
+    records = []
+    next_send_ns = time.time_ns()
+    while time.time_ns() < end_ms * 1_000_000:
+        wait_until(min(next_send_ns / 1_000_000, end_ms))
+        if time.time_ns() >= end_ms * 1_000_000:
+            break
+        index = len(records)
+        request_id = uuid.uuid4().hex
+        sent_ns = time.time_ns()
+        status, headers, _ = http(PROXIES[index % len(PROXIES)] + paths[algorithm], headers={
+            "X-Client-Id": f"{run}-{behavior}", "X-Experiment-Request-Id": request_id})
+        response_ns = time.time_ns()
+        assert status in (200, 429) and headers.get("X-RateLimit-Mode") == "redis", headers
+        retry_after = int(headers["Retry-After"]) if status == 429 else None
+        if retry_after is not None:
+            assert retry_after >= 1
+        records.append({"algorithm": algorithm, "scenario": behavior,
+                        "phase": "retry-client", "request_id": request_id,
+                        "sent_ns": sent_ns, "response_ns": response_ns,
+                        "request_path": paths[algorithm], "scheduled_ms": next_send_ns // 1_000_000,
+                        "kong_ms": int(headers["X-RateLimit-Time-Ms"]), "status": status,
+                        "retry_after_seconds": retry_after, "gateway": headers["X-Kong-Instance"]})
+        # Initial overload is identical: limit+1 immediate attempts. Thereafter 5/s,
+        # except the cooperative client waits from receipt of each 429 response.
+        if behavior == "retry-follow" and status == 429:
+            next_send_ns = response_ns + retry_after * 1_000_000_000
+        elif index < limit:
+            next_send_ns = response_ns
+        else:
+            # Do not add response latency to the regular send interval. Slow
+            # responses limit this sequential client; it does not catch up.
+            next_send_ns = max(response_ns, sent_ns + 200_000_000)
+    if behavior == "retry-follow":
+        for previous, current in zip(records, records[1:]):
+            if previous["status"] == 429:
+                assert current["sent_ns"] >= previous["response_ns"] + previous["retry_after_seconds"] * 1_000_000_000
+    assert any(r["status"] == 429 for r in records)
+    return records
+
+
 def measure(args):
     """Container-side worker; JSON on stdout, progress on stderr."""
     run = uuid.uuid4().hex
@@ -90,50 +133,13 @@ def measure(args):
             jobs = [(algorithm, i) for i in range(count) for algorithm in ALGORITHMS]
             return list(pool.map(request, jobs))
 
-        def retry_client(algorithm, behavior, start_ms, end_ms):
-            # Each behavior has an independent budget and the same initial overload.
-            wait_until(start_ms)
-            records = []
-            next_send_ns = time.time_ns()
-            while time.time_ns() < end_ms * 1_000_000:
-                wait_until(next_send_ns / 1_000_000)
-                if time.time_ns() >= end_ms * 1_000_000:
-                    break
-                index = len(records)
-                request_id = uuid.uuid4().hex
-                sent_ns = time.time_ns()
-                status, headers, _ = http(PROXIES[index % len(PROXIES)] + paths[algorithm], headers={
-                    "X-Client-Id": f"{run}-{behavior}", "X-Experiment-Request-Id": request_id})
-                response_ns = time.time_ns()
-                assert status in (200, 429) and headers.get("X-RateLimit-Mode") == "redis", headers
-                retry_after = int(headers["Retry-After"]) if status == 429 else None
-                if retry_after is not None:
-                    assert retry_after >= 1
-                records.append({"algorithm": algorithm, "scenario": behavior,
-                                "phase": "retry-client", "request_id": request_id,
-                                "sent_ns": sent_ns, "response_ns": response_ns,
-                                "request_path": paths[algorithm], "scheduled_ms": next_send_ns // 1_000_000,
-                                "kong_ms": int(headers["X-RateLimit-Time-Ms"]), "status": status,
-                                "retry_after_seconds": retry_after, "gateway": headers["X-Kong-Instance"]})
-                # Initial overload is identical: limit+1 immediate attempts. Thereafter 5/s,
-                # except the cooperative client waits from receipt of each 429 response.
-                delay_ns = 0 if index < args.limit else 200_000_000
-                if behavior == "retry-follow" and status == 429:
-                    delay_ns = retry_after * 1_000_000_000
-                next_send_ns = response_ns + delay_ns
-            if behavior == "retry-follow":
-                for previous, current in zip(records, records[1:]):
-                    if previous["status"] == 429:
-                        assert current["sent_ns"] >= previous["response_ns"] + previous["retry_after_seconds"] * 1_000_000_000
-            assert any(r["status"] == 429 for r in records)
-            return records
-
         boundary_ms = (int(time.time() * 1000) // args.window_ms + 1) * args.window_ms
         if boundary_ms - time.time() * 1000 < 3000:
             boundary_ms += args.window_ms
         with ThreadPoolExecutor(max_workers=4) as clients, ThreadPoolExecutor(max_workers=24) as pool:
             retry_jobs = [clients.submit(retry_client, algorithm, behavior, boundary_ms + 4000,
-                                         boundary_ms + args.duration_seconds * 1000)
+                                         boundary_ms + args.duration_seconds * 1000,
+                                         run=run, paths=paths, limit=args.limit)
                           for algorithm in ALGORITHMS for behavior in ("retry-follow", "retry-ignore")]
             before = burst("boundary", "before", args.limit, boundary_ms - 1000, pool)
             after = burst("boundary", "after", args.limit, boundary_ms + 1000, pool)
