@@ -102,6 +102,45 @@ The MVP implements both fixed and approximate sliding windows. Fixed windows pro
 
 Each limit is configured through the custom plugin, including its algorithm, window duration, threshold, and counter dimensions.
 
+##### Sliding-window pros and cons
+
+The two-counter approximation is inspired by [Cloudflare's sliding-window description](https://blog.cloudflare.com/counting-things-a-lot-of-different-things/#sliding-windows-to-the-rescue): current usage plus a decreasing weight of the previous window's usage.
+
+**Pros**
+
+- Previous-window memory reduces the abrupt budget reset and boundary bursts of fixed windows.
+- Only two counters participate in each decision, avoiding a per-request timestamp log and keeping calculation work constant per limit.
+
+**Cons**
+
+- Weighting assumes traffic was spread uniformly across the previous window. It can overestimate or underestimate exact rolling usage.
+- Compared with fixed windows, it reads an additional counter and performs a weighted calculation.
+- It still allows bursts within the available budget; it does not queue requests or maintain a constant upstream rate.
+
+##### Implementation tradeoffs
+
+| Choice | Benefit | Cost or limitation |
+| --- | --- | --- |
+| Approximate sliding windows | Reduce boundary resets with bounded counter state. | Accept estimation error rather than enforcing an exact rolling-window quota. |
+| Keep fixed windows as an option | Simpler accounting and a direct baseline against Kong's bundled limiter. | A full budget can be admitted on either side of a boundary. |
+| Count all attempts, including 429 responses | Discourage clients from ignoring Retry-After. | Rejected attempts contribute to subsequent sliding-window usage and can prolong throttling. Clients sharing an identity share this penalty. |
+
+Counting rejected attempts is our accounting policy, separate from the sliding-window algorithm. Fixed-window counts reset at the next boundary; sliding windows retain weighted previous usage. Clients should pause for the returned `Retry-After` before trying again.
+
+##### Evidence: window-boundary bursts
+
+![Accepted requests per 100-millisecond bucket around a window boundary](docs/images/window-tradeoffs.png)
+
+Both policies use **20 attempts per 10 seconds per ClientId**, shared across three Kong nodes. The upper panels show bursts of 20 requests at -1s and +1s relative to a window boundary: fixed admits 20 + 20, while sliding admits 20 + 2. The lower panels use fresh identities and show that both algorithms can admit 20 requests together. Blue bars count actual upstream arrivals per **100 ms**, not cumulative totals. This illustrates boundary behavior, not constant pacing or an exact rolling-window guarantee.
+
+##### Evidence: client retry behavior
+
+![Attempted, accepted and rejected requests for clients respecting or ignoring Retry-After](docs/images/retry-behavior.png)
+
+Each panel uses an independent identity with the same 20-attempt/10-second configuration and initial overload of 21 immediate attempts. Afterward, the client tries five requests per second. The cooperative client pauses after each 429 for the returned `Retry-After`, measured from response receipt, then resumes. The other continues sending. Counts are grouped into **one-second buckets**; accepted counts use actual upstream timestamps. Pauses come from the client, rather than request shaping by the limiter. Respecting the header does not prevent future 429 responses when the resumed request rate still exceeds the budget.
+
+These figures come from saved Parquet captures containing client timestamps, response codes, paths, `Retry-After`, and independently recorded upstream arrivals. The capture verifies each cooperative pause and matches upstream request IDs exactly to successful responses. They illustrate this workload rather than throughput performance. See [capture and offline plotting commands](test/README.md#window-boundary-and-client-retry-illustrations) to reproduce or change the plot without generating traffic again.
+
 #### Distributed Consistency with Redis
 
 The design draws on Kong's Redis policy and Traefik's Redis limiter: Redis-side atomic operations allow multiple gateway nodes to coordinate shared counters. Kong's synchronous and asynchronous modes also provide a reference for evaluating the tradeoff between consistency and throughput.
